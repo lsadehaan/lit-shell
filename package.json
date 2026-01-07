@@ -1,0 +1,94 @@
+{
+  "name": "x-shell.js",
+  "version": "0.1.0",
+  "description": "WebSocket-based terminal for Node.js - the truth is in your shell",
+  "type": "module",
+  "main": "dist/server/index.js",
+  "types": "dist/server/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./client/browser": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/browser-bundle.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    },
+    "./ui/browser": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/browser-bundle.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && npm run build:browser",
+    "build:browser": "node scripts/build-browser.js",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "echo \"Tests coming soon\" && exit 0"
+  },
+  "keywords": [
+    "terminal",
+    "websocket",
+    "pty",
+    "xterm",
+    "shell",
+    "web-terminal",
+    "node-pty",
+    "lit",
+    "web-components",
+    "custom-elements"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lsadehaan/x-shell.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lsadehaan/x-shell/issues"
+  },
+  "homepage": "https://github.com/lsadehaan/x-shell#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "lit": "^3.3.2",
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.3.0"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0 || ^5.0.0",
+    "node-pty": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
+    "node-pty": {
+      "optional": true
+    }
+  }
+}
