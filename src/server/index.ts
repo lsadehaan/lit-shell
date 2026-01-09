@@ -1,5 +1,5 @@
 /**
- * x-shell.js server exports
+ * lit-shell.js server exports
  */
 
 export { TerminalServer, createTerminalMiddleware } from './terminal-server.js';

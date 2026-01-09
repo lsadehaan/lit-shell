@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-**x-shell.js** is a WebSocket-based terminal solution for Node.js web applications. It provides a server component (node-pty), client library, and ready-to-use Lit web component.
+**lit-shell.js** is a WebSocket-based terminal solution for Node.js web applications. It provides a server component (node-pty), client library, and ready-to-use Lit web component.
 
 ## Development Commands
 
@@ -22,15 +22,15 @@ npm test               # Run tests (placeholder for now)
 
 The library exports three separate modules:
 
-1. **`x-shell.js/server`** - Server-side terminal handler
+1. **`lit-shell.js/server`** - Server-side terminal handler
    - `TerminalServer` - WebSocket server with node-pty integration
    - `createTerminalMiddleware()` - Express middleware factory
 
-2. **`x-shell.js/client`** - Client-side terminal client
+2. **`lit-shell.js/client`** - Client-side terminal client
    - `TerminalClient` - WebSocket client with auto-reconnection
 
-3. **`x-shell.js/ui`** - Lit web components
-   - `<x-shell-terminal>` - Ready-to-use terminal component
+3. **`lit-shell.js/ui`** - Lit web components
+   - `<lit-shell-terminal>` - Ready-to-use terminal component
 
 ### Source Structure
 
@@ -47,7 +47,7 @@ src/
 └── ui/
     ├── index.ts           # UI exports
     ├── styles.ts          # Theme CSS custom properties
-    └── x-shell-terminal.ts # Lit web component
+    └── lit-shell-terminal.ts # Lit web component
 ```
 
 ### Key Design Patterns
@@ -110,7 +110,7 @@ const server = new TerminalServer({
 ```javascript
 import express from 'express';
 import { createServer } from 'http';
-import { TerminalServer } from 'x-shell.js/server';
+import { TerminalServer } from 'lit-shell.js/server';
 
 const app = express();
 const server = createServer(app);
@@ -128,20 +128,20 @@ server.listen(3000);
 
 ```html
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
-<script type="module" src="https://unpkg.com/x-shell.js/dist/ui/browser-bundle.js"></script>
+<script type="module" src="https://unpkg.com/lit-shell.js/dist/ui/browser-bundle.js"></script>
 
-<x-shell-terminal
+<lit-shell-terminal
   url="ws://localhost:3000/terminal"
   theme="dark"
   auto-connect
   auto-spawn
-></x-shell-terminal>
+></lit-shell-terminal>
 ```
 
 ### Using the Client API Directly
 
 ```javascript
-import { TerminalClient } from 'x-shell.js/client';
+import { TerminalClient } from 'lit-shell.js/client';
 
 const client = new TerminalClient({ url: 'ws://localhost:3000/terminal' });
 await client.connect();

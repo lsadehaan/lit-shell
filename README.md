@@ -1,4 +1,4 @@
-# x-shell.js
+# lit-shell.js
 
 > WebSocket-based terminal for Node.js - the truth is in your shell
 
@@ -8,7 +8,7 @@ A plug-and-play terminal solution for web applications. Includes a server compon
 
 - **Server**: WebSocket server with node-pty for real shell sessions
 - **Client**: Lightweight WebSocket client with auto-reconnection
-- **UI**: `<x-shell-terminal>` Lit web component with xterm.js
+- **UI**: `<lit-shell-terminal>` Lit web component with xterm.js
 - **Themes**: Built-in dark/light/auto theme support
 - **Security**: Configurable shell and path allowlists
 - **Framework Agnostic**: Works with React, Vue, Angular, Svelte, or vanilla JS
@@ -16,7 +16,7 @@ A plug-and-play terminal solution for web applications. Includes a server compon
 ## Installation
 
 ```bash
-npm install x-shell.js node-pty
+npm install lit-shell.js node-pty
 ```
 
 Note: `node-pty` requires native compilation. See [node-pty docs](https://github.com/microsoft/node-pty) for platform-specific requirements.
@@ -28,7 +28,7 @@ Note: `node-pty` requires native compilation. See [node-pty docs](https://github
 ```javascript
 import express from 'express';
 import { createServer } from 'http';
-import { TerminalServer } from 'x-shell.js/server';
+import { TerminalServer } from 'lit-shell.js/server';
 
 const app = express();
 const server = createServer(app);
@@ -54,22 +54,22 @@ server.listen(3000, () => {
 <!-- Load xterm.js CSS -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 
-<!-- Load x-shell.js UI bundle -->
-<script type="module" src="https://unpkg.com/x-shell.js/dist/ui/browser-bundle.js"></script>
+<!-- Load lit-shell.js UI bundle -->
+<script type="module" src="https://unpkg.com/lit-shell.js/dist/ui/browser-bundle.js"></script>
 
 <!-- Use the component -->
-<x-shell-terminal
+<lit-shell-terminal
   url="ws://localhost:3000/terminal"
   theme="dark"
   auto-connect
   auto-spawn
-></x-shell-terminal>
+></lit-shell-terminal>
 ```
 
 ### Client Usage (JavaScript)
 
 ```javascript
-import { TerminalClient } from 'x-shell.js/client';
+import { TerminalClient } from 'lit-shell.js/client';
 
 const client = new TerminalClient({
   url: 'ws://localhost:3000/terminal'
@@ -101,7 +101,7 @@ client.resize(120, 40);
 #### `TerminalServer`
 
 ```typescript
-import { TerminalServer } from 'x-shell.js/server';
+import { TerminalServer } from 'lit-shell.js/server';
 
 const server = new TerminalServer({
   // Allowed shells (empty = all allowed)
@@ -147,7 +147,7 @@ server.close();
 #### `TerminalClient`
 
 ```typescript
-import { TerminalClient } from 'x-shell.js/client';
+import { TerminalClient } from 'lit-shell.js/client';
 
 const client = new TerminalClient({
   url: 'ws://localhost:3000/terminal',
@@ -197,10 +197,10 @@ client.getSessionInfo();   // SessionInfo | null
 
 ### UI Component
 
-#### `<x-shell-terminal>`
+#### `<lit-shell-terminal>`
 
 ```html
-<x-shell-terminal
+<lit-shell-terminal
   url="ws://localhost:3000/terminal"
   shell="/bin/bash"
   cwd="/home/user"
@@ -212,7 +212,7 @@ client.getSessionInfo();   // SessionInfo | null
   auto-connect
   auto-spawn
   no-header
-></x-shell-terminal>
+></lit-shell-terminal>
 ```
 
 **Attributes:**
@@ -234,7 +234,7 @@ client.getSessionInfo();   // SessionInfo | null
 **Methods:**
 
 ```javascript
-const terminal = document.querySelector('x-shell-terminal');
+const terminal = document.querySelector('lit-shell-terminal');
 
 await terminal.connect();     // Connect to server
 terminal.disconnect();        // Disconnect
@@ -261,21 +261,21 @@ terminal.addEventListener('error', (e) => console.log(e.detail.error));
 The component uses CSS custom properties for theming:
 
 ```css
-x-shell-terminal {
-  --xs-bg: #1e1e1e;
-  --xs-bg-header: #2d2d2d;
-  --xs-text: #cccccc;
-  --xs-text-muted: #808080;
-  --xs-border: #3e3e3e;
-  --xs-terminal-bg: #1e1e1e;
-  --xs-terminal-fg: #cccccc;
-  --xs-terminal-cursor: #ffffff;
-  --xs-terminal-selection: #264f78;
-  --xs-btn-bg: #3c3c3c;
-  --xs-btn-text: #cccccc;
-  --xs-btn-hover: #4a4a4a;
-  --xs-status-connected: #22c55e;
-  --xs-status-disconnected: #ef4444;
+lit-shell-terminal {
+  --ls-bg: #1e1e1e;
+  --ls-bg-header: #2d2d2d;
+  --ls-text: #cccccc;
+  --ls-text-muted: #808080;
+  --ls-border: #3e3e3e;
+  --ls-terminal-bg: #1e1e1e;
+  --ls-terminal-fg: #cccccc;
+  --ls-terminal-cursor: #ffffff;
+  --ls-terminal-selection: #264f78;
+  --ls-btn-bg: #3c3c3c;
+  --ls-btn-text: #cccccc;
+  --ls-btn-hover: #4a4a4a;
+  --ls-status-connected: #22c55e;
+  --ls-status-disconnected: #ef4444;
 }
 ```
 

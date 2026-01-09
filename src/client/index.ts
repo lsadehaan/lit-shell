@@ -1,5 +1,5 @@
 /**
- * x-shell.js client exports
+ * lit-shell.js client exports
  */
 
 export { TerminalClient } from './terminal-client.js';

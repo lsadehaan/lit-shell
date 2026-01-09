@@ -91,7 +91,7 @@ export class TerminalServer {
       this.pty = await import('node-pty');
     } catch (error) {
       throw new Error(
-        'node-pty is required for x-shell. Install it with: npm install node-pty'
+        'node-pty is required for lit-shell. Install it with: npm install node-pty'
       );
     }
   }
@@ -430,7 +430,7 @@ export class TerminalServer {
   private log(message: string, level: 'info' | 'warn' | 'error' = 'info'): void {
     if (!this.config.verbose && level === 'info') return;
 
-    const prefix = '[x-shell]';
+    const prefix = '[lit-shell]';
     switch (level) {
       case 'error':
         console.error(`${prefix} ${message}`);

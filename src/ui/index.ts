@@ -1,6 +1,6 @@
 /**
- * x-shell.js UI exports
+ * lit-shell.js UI exports
  */
 
-export { XShellTerminal } from './x-shell-terminal.js';
+export { LitShellTerminal } from './lit-shell-terminal.js';
 export { sharedStyles, buttonStyles, themeStyles } from './styles.js';

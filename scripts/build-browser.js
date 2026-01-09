@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build browser bundles for x-shell.js
+ * Build browser bundles for lit-shell.js
  */
 
 import * as esbuild from 'esbuild';

@@ -1,9 +1,9 @@
 /**
- * Terminal client for connecting to x-shell server
+ * Terminal client for connecting to lit-shell server
  *
  * Example usage:
  * ```typescript
- * import { TerminalClient } from 'x-shell.js/client';
+ * import { TerminalClient } from 'lit-shell.js/client';
  *
  * const client = new TerminalClient({ url: 'ws://localhost:3000/terminal' });
  * await client.connect();
@@ -169,7 +169,7 @@ export class TerminalClient {
     try {
       message = JSON.parse(data);
     } catch {
-      console.error('[x-shell] Invalid message:', data);
+      console.error('[lit-shell] Invalid message:', data);
       return;
     }
 
@@ -247,12 +247,12 @@ export class TerminalClient {
    */
   write(data: string): void {
     if (!this.ws || this.state !== 'connected') {
-      console.error('[x-shell] Cannot write: not connected');
+      console.error('[lit-shell] Cannot write: not connected');
       return;
     }
 
     if (!this.sessionId) {
-      console.error('[x-shell] Cannot write: no active session');
+      console.error('[lit-shell] Cannot write: no active session');
       return;
     }
 
@@ -270,12 +270,12 @@ export class TerminalClient {
    */
   resize(cols: number, rows: number): void {
     if (!this.ws || this.state !== 'connected') {
-      console.error('[x-shell] Cannot resize: not connected');
+      console.error('[lit-shell] Cannot resize: not connected');
       return;
     }
 
     if (!this.sessionId) {
-      console.error('[x-shell] Cannot resize: no active session');
+      console.error('[lit-shell] Cannot resize: no active session');
       return;
     }
 

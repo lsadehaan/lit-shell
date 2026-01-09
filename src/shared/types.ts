@@ -1,5 +1,5 @@
 /**
- * Shared types for x-shell.js
+ * Shared types for lit-shell.js
  */
 
 /**

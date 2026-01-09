@@ -1,5 +1,5 @@
 /**
- * Shared styles for x-shell UI components
+ * Shared styles for lit-shell UI components
  */
 
 import { css } from 'lit';
@@ -10,73 +10,73 @@ import { css } from 'lit';
 export const themeStyles = css`
   /* Light theme */
   :host([theme='light']) {
-    --xs-bg: #ffffff;
-    --xs-bg-header: #f5f5f5;
-    --xs-text: #1f2937;
-    --xs-text-muted: #6b7280;
-    --xs-border: #e5e7eb;
-    --xs-terminal-bg: #ffffff;
-    --xs-terminal-fg: #1f2937;
-    --xs-terminal-cursor: #1f2937;
-    --xs-terminal-selection: #b4d5fe;
-    --xs-btn-bg: #e5e7eb;
-    --xs-btn-text: #374151;
-    --xs-btn-hover: #d1d5db;
-    --xs-status-connected: #22c55e;
-    --xs-status-disconnected: #ef4444;
+    --ls-bg: #ffffff;
+    --ls-bg-header: #f5f5f5;
+    --ls-text: #1f2937;
+    --ls-text-muted: #6b7280;
+    --ls-border: #e5e7eb;
+    --ls-terminal-bg: #ffffff;
+    --ls-terminal-fg: #1f2937;
+    --ls-terminal-cursor: #1f2937;
+    --ls-terminal-selection: #b4d5fe;
+    --ls-btn-bg: #e5e7eb;
+    --ls-btn-text: #374151;
+    --ls-btn-hover: #d1d5db;
+    --ls-status-connected: #22c55e;
+    --ls-status-disconnected: #ef4444;
   }
 
   /* Dark theme (default) */
   :host,
   :host([theme='dark']) {
-    --xs-bg: #1e1e1e;
-    --xs-bg-header: #2d2d2d;
-    --xs-text: #cccccc;
-    --xs-text-muted: #808080;
-    --xs-border: #3e3e3e;
-    --xs-terminal-bg: #1e1e1e;
-    --xs-terminal-fg: #cccccc;
-    --xs-terminal-cursor: #ffffff;
-    --xs-terminal-selection: #264f78;
-    --xs-btn-bg: #3c3c3c;
-    --xs-btn-text: #cccccc;
-    --xs-btn-hover: #4a4a4a;
-    --xs-status-connected: #22c55e;
-    --xs-status-disconnected: #ef4444;
+    --ls-bg: #1e1e1e;
+    --ls-bg-header: #2d2d2d;
+    --ls-text: #cccccc;
+    --ls-text-muted: #808080;
+    --ls-border: #3e3e3e;
+    --ls-terminal-bg: #1e1e1e;
+    --ls-terminal-fg: #cccccc;
+    --ls-terminal-cursor: #ffffff;
+    --ls-terminal-selection: #264f78;
+    --ls-btn-bg: #3c3c3c;
+    --ls-btn-text: #cccccc;
+    --ls-btn-hover: #4a4a4a;
+    --ls-status-connected: #22c55e;
+    --ls-status-disconnected: #ef4444;
   }
 
   /* Auto theme - follows system preference */
   :host([theme='auto']) {
-    --xs-bg: #1e1e1e;
-    --xs-bg-header: #2d2d2d;
-    --xs-text: #cccccc;
-    --xs-text-muted: #808080;
-    --xs-border: #3e3e3e;
-    --xs-terminal-bg: #1e1e1e;
-    --xs-terminal-fg: #cccccc;
-    --xs-terminal-cursor: #ffffff;
-    --xs-terminal-selection: #264f78;
-    --xs-btn-bg: #3c3c3c;
-    --xs-btn-text: #cccccc;
-    --xs-btn-hover: #4a4a4a;
-    --xs-status-connected: #22c55e;
-    --xs-status-disconnected: #ef4444;
+    --ls-bg: #1e1e1e;
+    --ls-bg-header: #2d2d2d;
+    --ls-text: #cccccc;
+    --ls-text-muted: #808080;
+    --ls-border: #3e3e3e;
+    --ls-terminal-bg: #1e1e1e;
+    --ls-terminal-fg: #cccccc;
+    --ls-terminal-cursor: #ffffff;
+    --ls-terminal-selection: #264f78;
+    --ls-btn-bg: #3c3c3c;
+    --ls-btn-text: #cccccc;
+    --ls-btn-hover: #4a4a4a;
+    --ls-status-connected: #22c55e;
+    --ls-status-disconnected: #ef4444;
   }
 
   @media (prefers-color-scheme: light) {
     :host([theme='auto']) {
-      --xs-bg: #ffffff;
-      --xs-bg-header: #f5f5f5;
-      --xs-text: #1f2937;
-      --xs-text-muted: #6b7280;
-      --xs-border: #e5e7eb;
-      --xs-terminal-bg: #ffffff;
-      --xs-terminal-fg: #1f2937;
-      --xs-terminal-cursor: #1f2937;
-      --xs-terminal-selection: #b4d5fe;
-      --xs-btn-bg: #e5e7eb;
-      --xs-btn-text: #374151;
-      --xs-btn-hover: #d1d5db;
+      --ls-bg: #ffffff;
+      --ls-bg-header: #f5f5f5;
+      --ls-text: #1f2937;
+      --ls-text-muted: #6b7280;
+      --ls-border: #e5e7eb;
+      --ls-terminal-bg: #ffffff;
+      --ls-terminal-fg: #1f2937;
+      --ls-terminal-cursor: #1f2937;
+      --ls-terminal-selection: #b4d5fe;
+      --ls-btn-bg: #e5e7eb;
+      --ls-btn-text: #374151;
+      --ls-btn-hover: #d1d5db;
     }
   }
 `;
@@ -90,8 +90,8 @@ export const sharedStyles = css`
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
       Ubuntu, Cantarell, sans-serif;
     font-size: 14px;
-    color: var(--xs-text);
-    background: var(--xs-bg);
+    color: var(--ls-text);
+    background: var(--ls-bg);
   }
 
   * {
@@ -110,15 +110,15 @@ export const buttonStyles = css`
     padding: 6px 12px;
     border: none;
     border-radius: 4px;
-    background: var(--xs-btn-bg);
-    color: var(--xs-btn-text);
+    background: var(--ls-btn-bg);
+    color: var(--ls-btn-text);
     font-size: 13px;
     cursor: pointer;
     transition: background-color 0.15s;
   }
 
   button:hover {
-    background: var(--xs-btn-hover);
+    background: var(--ls-btn-hover);
   }
 
   button:disabled {

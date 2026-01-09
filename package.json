@@ -1,6 +1,6 @@
 {
-  "name": "x-shell.js",
-  "version": "0.1.2",
+  "name": "lit-shell.js",
+  "version": "0.1.3",
   "description": "WebSocket-based terminal for Node.js - the truth is in your shell",
   "type": "module",
   "main": "dist/server/index.js",
@@ -60,12 +60,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lsadehaan/x-shell.git"
+    "url": "git+https://github.com/lsadehaan/lit-shell.git"
   },
   "bugs": {
-    "url": "https://github.com/lsadehaan/x-shell/issues"
+    "url": "https://github.com/lsadehaan/lit-shell/issues"
   },
-  "homepage": "https://github.com/lsadehaan/x-shell#readme",
+  "homepage": "https://github.com/lsadehaan/lit-shell#readme",
   "engines": {
     "node": ">=18.0.0"
   },

@@ -1,17 +1,17 @@
 /**
- * x-shell-terminal web component
+ * lit-shell-terminal web component
  *
  * A ready-to-use terminal component that wraps xterm.js and
- * connects to an x-shell server via WebSocket.
+ * connects to a lit-shell server via WebSocket.
  *
  * Usage:
  * ```html
- * <x-shell-terminal
+ * <lit-shell-terminal
  *   url="ws://localhost:3000/terminal"
  *   shell="/bin/bash"
  *   cwd="/home/user"
  *   theme="dark"
- * ></x-shell-terminal>
+ * ></lit-shell-terminal>
  * ```
  */
 
@@ -41,8 +41,8 @@ interface IFitAddon {
   proposeDimensions(): { cols: number; rows: number } | undefined;
 }
 
-@customElement('x-shell-terminal')
-export class XShellTerminal extends LitElement {
+@customElement('lit-shell-terminal')
+export class LitShellTerminal extends LitElement {
   static override styles = [
     sharedStyles,
     themeStyles,
@@ -53,7 +53,7 @@ export class XShellTerminal extends LitElement {
         flex-direction: column;
         height: 100%;
         min-height: 200px;
-        border: 1px solid var(--xs-border);
+        border: 1px solid var(--ls-border);
         border-radius: 4px;
         overflow: hidden;
       }
@@ -63,8 +63,8 @@ export class XShellTerminal extends LitElement {
         align-items: center;
         justify-content: space-between;
         padding: 8px 12px;
-        background: var(--xs-bg-header);
-        border-bottom: 1px solid var(--xs-border);
+        background: var(--ls-bg-header);
+        border-bottom: 1px solid var(--ls-border);
       }
 
       .header-title {
@@ -84,24 +84,24 @@ export class XShellTerminal extends LitElement {
         align-items: center;
         gap: 6px;
         font-size: 12px;
-        color: var(--xs-text-muted);
+        color: var(--ls-text-muted);
       }
 
       .status-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: var(--xs-status-disconnected);
+        background: var(--ls-status-disconnected);
       }
 
       .status-dot.connected {
-        background: var(--xs-status-connected);
+        background: var(--ls-status-connected);
       }
 
       .terminal-container {
         flex: 1;
         padding: 4px;
-        background: var(--xs-terminal-bg);
+        background: var(--ls-terminal-bg);
         overflow: hidden;
       }
 
@@ -121,7 +121,7 @@ export class XShellTerminal extends LitElement {
         height: 100%;
         padding: 20px;
         text-align: center;
-        color: var(--xs-text-muted);
+        color: var(--ls-text-muted);
       }
 
       .error {
@@ -215,6 +215,38 @@ export class XShellTerminal extends LitElement {
       } catch {
         throw new Error('Failed to load xterm.js. Make sure it is available.');
       }
+    }
+
+    // Load xterm.css into shadow DOM (CSS doesn't penetrate shadow boundaries)
+    await this.loadXtermStyles();
+  }
+
+  /**
+   * Load xterm.css into the shadow DOM
+   * This is necessary because CSS loaded in the main document doesn't apply inside shadow DOM
+   */
+  private async loadXtermStyles(): Promise<void> {
+    if (!this.shadowRoot) return;
+
+    // Check if styles are already loaded
+    if (this.shadowRoot.querySelector('#xterm-styles')) return;
+
+    try {
+      // Fetch xterm.css from CDN
+      const response = await fetch('https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css');
+      if (!response.ok) {
+        throw new Error(`Failed to fetch xterm.css: ${response.status}`);
+      }
+      const cssText = await response.text();
+
+      // Create style element and inject into shadow DOM
+      const style = document.createElement('style');
+      style.id = 'xterm-styles';
+      style.textContent = cssText;
+      this.shadowRoot.appendChild(style);
+    } catch (error) {
+      console.warn('[lit-shell] Failed to load xterm.css:', error);
+      // Terminal will still work but may have visual issues
     }
   }
 
@@ -507,7 +539,7 @@ export class XShellTerminal extends LitElement {
               <div class="header-title">
                 <span>Terminal</span>
                 ${this.sessionInfo
-                  ? html`<span style="font-weight: normal; font-size: 12px; color: var(--xs-text-muted)">
+                  ? html`<span style="font-weight: normal; font-size: 12px; color: var(--ls-text-muted)">
                       ${this.sessionInfo.shell}
                     </span>`
                   : nothing}
@@ -544,6 +576,6 @@ export class XShellTerminal extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'x-shell-terminal': XShellTerminal;
+    'lit-shell-terminal': LitShellTerminal;
   }
 }

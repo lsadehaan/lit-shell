@@ -82,14 +82,14 @@ jobs:
         gh release create ${{ github.ref_name }} \
           --title "Release v${{ steps.version.outputs.VERSION }}" \
           --notes "$(cat <<'EOF'
-        ## 🐚 x-shell.js v${{ steps.version.outputs.VERSION }}
+        ## 🐚 lit-shell.js v${{ steps.version.outputs.VERSION }}
 
         The truth is in your shell!
 
         ### 📦 Installation
 
         ```bash
-        npm install x-shell.js node-pty
+        npm install lit-shell.js node-pty
         ```
 
         ### ✨ What's New
@@ -99,12 +99,12 @@ jobs:
         ### 🚀 Quick Start
 
         ```html
-        <x-shell-terminal
+        <lit-shell-terminal
           url="ws://localhost:3000/terminal"
           theme="dark"
           auto-connect
           auto-spawn
-        ></x-shell-terminal>
+        ></lit-shell-terminal>
         ```
 
         ### 📚 Documentation
