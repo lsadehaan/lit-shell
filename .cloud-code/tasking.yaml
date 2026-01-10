@@ -1,0 +1,23 @@
+version: 1
+updated_at: '2026-01-10T21:59:46.436412'
+workspace: /var/cloud-code/workspaces/lsadehaan-lit-shell.worktrees/task-d9fc5824-f34f-4d6f-b369-6b2cab9c1a82
+tasks:
+- id: d9fc5824-f34f-4d6f-b369-6b2cab9c1a82
+  title: Review and Plan
+  status: assigned
+  priority: medium
+  branch: cloud-code/issue-1
+  description: 'I want you to do a thorough review of the project.
+
+    Then create a "status.md" file documenting the current implementation state.
+
+    Then also create a "roadmap.md" file with cleanup, bugfixes, polish and additional
+    features we might want to add.
+
+    Then create tasks for all the items in the roadmap.'
+  acceptance_criteria: []
+  context:
+    related_files: []
+    dependencies: []
+  depends_on: []
+  workspace_mode: shared
