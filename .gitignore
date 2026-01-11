@@ -24,3 +24,6 @@ coverage/
 # Environment
 .env
 .env.local
+
+# Cloud Code files (should not be tracked)
+.cloud-code/
