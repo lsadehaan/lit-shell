@@ -2,7 +2,7 @@
 
 **Project:** lit-shell.js
 **Version:** 0.1.3 → 1.0.0+
-**Last Updated:** January 10, 2026
+**Last Updated:** January 11, 2026
 
 ## Overview
 
@@ -11,12 +11,12 @@ This roadmap outlines the planned improvements, features, and enhancements for l
 ## 🚨 **Critical Issues & Fixes**
 
 ### Testing Infrastructure (Priority: 🔴 Critical)
-- **Test Framework Setup** - Implement comprehensive test suite
-- **Unit Tests** - Server, client, and UI module testing
+- **Test Framework Setup** - Replace placeholder test script with real testing (Vitest/Jest recommended)
+- **Unit Tests** - Server (terminal-server.ts), client (terminal-client.ts), and UI (lit-shell-terminal.ts) module testing
 - **Integration Tests** - End-to-end WebSocket communication testing
-- **Browser Tests** - Web component testing with real browser environments
-- **Test Coverage** - Achieve >90% code coverage with reporting
-- **CI/CD Integration** - Automated testing in GitHub Actions
+- **Browser Tests** - Web component testing with playwright/cypress for xterm.js integration
+- **Test Coverage** - Achieve >90% code coverage with reporting (current: 0%)
+- **CI/CD Integration** - Tests already run in CI but need actual implementation
 
 ### Error Handling & Resilience (Priority: 🔴 Critical)
 - **Connection Recovery** - Enhanced WebSocket reconnection logic
@@ -106,11 +106,11 @@ This roadmap outlines the planned improvements, features, and enhancements for l
 ## 📋 **Cleanup & Polish Tasks**
 
 ### Code Quality (Priority: 🟡 High)
-- **ESLint Configuration** - Consistent code style enforcement
-- **Prettier Setup** - Automated code formatting
-- **Type Safety Improvements** - Eliminate any remaining `any` types
-- **Documentation Generation** - Automated JSDoc generation
-- **Code Reviews** - Establish code review standards
+- **ESLint Configuration** - Consistent code style enforcement (currently no linting rules)
+- **Prettier Setup** - Automated code formatting (currently no formatting rules)
+- **Type Safety Improvements** - Eliminate any remaining `any` types (found: pty: any in terminal-server.ts:23)
+- **Documentation Generation** - Automated JSDoc generation from inline comments
+- **Code Reviews** - Establish code review standards and PR templates
 
 ### Build System Improvements (Priority: 🟢 Medium)
 - **Build Optimization** - Faster build times and better caching
