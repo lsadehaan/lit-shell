@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>lit-shell Docker Container Example</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: 24px;
+      color: #4ade80;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .terminal-wrapper {
+      height: 600px;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    lit-shell-terminal {
+      height: 100%;
+    }
+
+    .info {
+      margin-top: 20px;
+      padding: 15px;
+      background: #2a2a4e;
+      border-radius: 8px;
+      border-left: 4px solid #3b82f6;
+    }
+
+    .info h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      color: #3b82f6;
+    }
+
+    .info p {
+      margin: 0;
+      font-size: 13px;
+      color: #aaa;
+      line-height: 1.6;
+    }
+
+    .info code {
+      background: #1a1a2e;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>lit-shell Docker Container Example</h1>
+
+    <div class="terminal-wrapper">
+      <lit-shell-terminal
+        id="terminal"
+        theme="dark"
+        show-connection-panel
+        show-settings
+        show-status-bar
+      ></lit-shell-terminal>
+    </div>
+
+    <div class="info">
+      <h3>How to Test</h3>
+      <p>
+        1. Make sure Docker is running on this machine.<br>
+        2. Start a test container: <code>docker run -d --name test-container alpine sleep infinity</code><br>
+        3. The terminal will automatically detect Docker is enabled and show available containers.<br>
+        4. Select a container from the dropdown and click "Connect".<br>
+        5. You'll get a shell inside the container!<br>
+        6. Try running: <code>cat /etc/os-release</code> to see you're inside Alpine Linux.<br>
+        7. Use the settings dropdown (gear icon) to change theme and font size.
+      </p>
+    </div>
+  </div>
+
+  <!-- Load lit-shell.js UI component from CDN -->
+  <script type="module" src="https://unpkg.com/lit-shell.js/dist/ui/browser-bundle.js"></script>
+  <script type="module">
+    const terminal = document.getElementById('terminal');
+
+    // Set WebSocket URL dynamically based on current host
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/terminal`;
+    terminal.url = wsUrl;
+    console.log('WebSocket URL:', wsUrl);
+
+    // Connect to the server on page load (just connect, don't spawn yet)
+    terminal.connect().catch(err => {
+      console.error('Failed to connect:', err);
+    });
+
+    // Log events for debugging
+    terminal.addEventListener('connect', () => {
+      console.log('Connected to server');
+    });
+
+    terminal.addEventListener('disconnect', () => {
+      console.log('Disconnected from server');
+    });
+
+    terminal.addEventListener('spawned', (e) => {
+      console.log('Session spawned:', e.detail.session);
+    });
+
+    terminal.addEventListener('exit', (e) => {
+      console.log('Session exited with code:', e.detail.exitCode);
+    });
+
+    terminal.addEventListener('error', (e) => {
+      console.error('Error:', e.detail.error);
+    });
+
+    terminal.addEventListener('theme-change', (e) => {
+      console.log('Theme changed to:', e.detail.theme);
+    });
+  </script>
+</body>
+</html>

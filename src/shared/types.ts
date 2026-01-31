@@ -3,6 +3,11 @@
  */
 
 /**
+ * Session type for multiplexing
+ */
+export type SessionType = 'local' | 'docker-exec' | 'docker-attach';
+
+/**
  * Terminal spawn options
  */
 export interface TerminalOptions {
@@ -16,6 +21,26 @@ export interface TerminalOptions {
   cols?: number;
   /** Initial rows (default: 24) */
   rows?: number;
+
+  // Docker container support
+  /** Docker container ID or name to exec into */
+  container?: string;
+  /** Shell to use inside the container (default: /bin/bash) */
+  containerShell?: string;
+  /** User to run as inside the container */
+  containerUser?: string;
+  /** Working directory inside the container */
+  containerCwd?: string;
+
+  // Session multiplexing options
+  /** Use docker attach instead of docker exec (connects to main process) */
+  attachMode?: boolean;
+  /** Session label for easier identification */
+  label?: string;
+  /** Allow other clients to join this session (default: true) */
+  allowJoin?: boolean;
+  /** Enable history buffer for replay on join (default: true) */
+  enableHistory?: boolean;
 }
 
 /**
@@ -34,6 +59,14 @@ export interface ServerConfig {
   maxSessionsPerClient?: number;
   /** Session idle timeout in ms (0 = no timeout) */
   idleTimeout?: number;
+
+  // Docker container support
+  /** Enable Docker exec feature (default: false) */
+  allowDockerExec?: boolean;
+  /** Regex patterns for allowed container names/IDs (empty = all allowed when Docker exec is enabled) */
+  allowedContainerPatterns?: string[];
+  /** Default shell to use inside containers */
+  defaultContainerShell?: string;
 }
 
 /**
@@ -46,7 +79,41 @@ export type MessageType =
   | 'close'
   | 'error'
   | 'exit'
-  | 'spawned';
+  | 'spawned'
+  | 'listContainers'
+  | 'containerList'
+  | 'serverInfo'
+  // Session multiplexing
+  | 'listSessions'
+  | 'sessionList'
+  | 'join'
+  | 'joined'
+  | 'leave'
+  | 'left'
+  | 'clientJoined'
+  | 'clientLeft'
+  | 'sessionClosed';
+
+/**
+ * Docker container info
+ */
+export interface ContainerInfo {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  state: 'running' | 'paused' | 'exited' | 'unknown';
+}
+
+/**
+ * Server capabilities info
+ */
+export interface ServerInfo {
+  dockerEnabled: boolean;
+  allowedShells: string[];
+  defaultShell: string;
+  defaultContainerShell?: string;
+}
 
 /**
  * Base message structure
@@ -74,6 +141,8 @@ export interface SpawnedMessage extends BaseMessage {
   cwd: string;
   cols: number;
   rows: number;
+  /** Container ID if this is a Docker exec session */
+  container?: string;
 }
 
 /**
@@ -122,6 +191,29 @@ export interface ExitMessage extends BaseMessage {
 }
 
 /**
+ * List containers request from client
+ */
+export interface ListContainersMessage extends BaseMessage {
+  type: 'listContainers';
+}
+
+/**
+ * Container list response from server
+ */
+export interface ContainerListMessage extends BaseMessage {
+  type: 'containerList';
+  containers: ContainerInfo[];
+}
+
+/**
+ * Server info response (sent on connect)
+ */
+export interface ServerInfoMessage extends BaseMessage {
+  type: 'serverInfo';
+  info: ServerInfo;
+}
+
+/**
  * Union of all message types
  */
 export type TerminalMessage =
@@ -131,7 +223,20 @@ export type TerminalMessage =
   | ResizeMessage
   | CloseMessage
   | ErrorMessage
-  | ExitMessage;
+  | ExitMessage
+  | ListContainersMessage
+  | ContainerListMessage
+  | ServerInfoMessage
+  // Session multiplexing
+  | ListSessionsMessage
+  | SessionListMessage
+  | JoinMessage
+  | JoinedMessage
+  | LeaveMessage
+  | LeftMessage
+  | ClientJoinedMessage
+  | ClientLeftMessage
+  | SessionClosedMessage;
 
 /**
  * Client configuration
@@ -157,4 +262,130 @@ export interface SessionInfo {
   cols: number;
   rows: number;
   createdAt: Date;
+  /** Container ID if this is a Docker exec session */
+  container?: string;
+}
+
+/**
+ * Extended session info with multiplexing data
+ */
+export interface SharedSessionInfo extends SessionInfo {
+  /** Type of session */
+  type: SessionType;
+  /** Number of connected clients */
+  clientCount: number;
+  /** Whether session accepts new clients */
+  accepting: boolean;
+  /** Session owner client ID */
+  ownerId?: string;
+  /** Session label */
+  label?: string;
+  /** Whether history replay is available */
+  historyEnabled: boolean;
+}
+
+/**
+ * Session list filter options
+ */
+export interface SessionListFilter {
+  /** Filter by session type */
+  type?: SessionType;
+  /** Filter by container name/ID */
+  container?: string;
+  /** Show only sessions accepting new clients */
+  accepting?: boolean;
+}
+
+/**
+ * Join session options
+ */
+export interface JoinSessionOptions {
+  /** Session ID to join */
+  sessionId: string;
+  /** Request recent output history */
+  requestHistory?: boolean;
+  /** Max history characters to retrieve */
+  historyLimit?: number;
+}
+
+// =============================================================================
+// Session Multiplexing Messages
+// =============================================================================
+
+/**
+ * List sessions request from client
+ */
+export interface ListSessionsMessage extends BaseMessage {
+  type: 'listSessions';
+  filter?: SessionListFilter;
+}
+
+/**
+ * Session list response from server
+ */
+export interface SessionListMessage extends BaseMessage {
+  type: 'sessionList';
+  sessions: SharedSessionInfo[];
+}
+
+/**
+ * Join session request from client
+ */
+export interface JoinMessage extends BaseMessage {
+  type: 'join';
+  options: JoinSessionOptions;
+}
+
+/**
+ * Joined session response from server
+ */
+export interface JoinedMessage extends BaseMessage {
+  type: 'joined';
+  sessionId: string;
+  session: SharedSessionInfo;
+  /** Recent output history (if requested) */
+  history?: string;
+}
+
+/**
+ * Leave session request from client (without killing the session)
+ */
+export interface LeaveMessage extends BaseMessage {
+  type: 'leave';
+  sessionId: string;
+}
+
+/**
+ * Left session response from server
+ */
+export interface LeftMessage extends BaseMessage {
+  type: 'left';
+  sessionId: string;
+}
+
+/**
+ * Client joined notification (broadcast to other clients in session)
+ */
+export interface ClientJoinedMessage extends BaseMessage {
+  type: 'clientJoined';
+  sessionId: string;
+  clientCount: number;
+}
+
+/**
+ * Client left notification (broadcast to other clients in session)
+ */
+export interface ClientLeftMessage extends BaseMessage {
+  type: 'clientLeft';
+  sessionId: string;
+  clientCount: number;
+}
+
+/**
+ * Session closed notification
+ */
+export interface SessionClosedMessage extends BaseMessage {
+  type: 'sessionClosed';
+  sessionId: string;
+  reason: 'orphan_timeout' | 'owner_closed' | 'process_exit' | 'error';
 }

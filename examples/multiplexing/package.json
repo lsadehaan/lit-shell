@@ -1,0 +1,15 @@
+{
+  "name": "lit-shell-multiplexing-example",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Example demonstrating lit-shell session multiplexing",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "lit-shell.js": "^1.0.0"
+  },
+  "devDependencies": {
+    "node-pty": "^1.1.0"
+  }
+}

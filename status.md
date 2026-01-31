@@ -131,7 +131,7 @@ lit-shell.js is a well-architected WebSocket-based terminal solution for Node.js
 
 ## Recent Changes
 
-- **v0.1.3** - Current version with recent rebranding from x-shell to lit-shell
+- **v0.1.3** - Current version with recent rebranding from lit-shell to lit-shell
 - **Public API** - `handleConnection()` method made public for manual WebSocket handling
 - **Build System** - Stable TypeScript + ESBuild pipeline
 - **Documentation** - Comprehensive README and development guide

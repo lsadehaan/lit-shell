@@ -2,6 +2,7 @@
  * Server-side terminal handler using node-pty
  *
  * Manages PTY sessions and WebSocket connections for web-based terminals.
+ * Supports session multiplexing - multiple clients can connect to the same session.
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
@@ -13,22 +14,15 @@ import type {
   TerminalOptions,
   TerminalMessage,
   SessionInfo,
+  ContainerInfo,
+  ServerInfo,
+  SessionType,
+  SharedSessionInfo,
+  SessionListFilter,
+  JoinSessionOptions,
 } from '../shared/types.js';
-
-/**
- * Terminal session data
- */
-interface TerminalSession {
-  id: string;
-  pty: any; // IPty from node-pty
-  ws: WebSocket;
-  shell: string;
-  cwd: string;
-  cols: number;
-  rows: number;
-  createdAt: Date;
-  lastActivity: Date;
-}
+import { exec } from 'child_process';
+import { SessionManager, SessionManagerConfig, SharedSession } from './session-manager.js';
 
 /**
  * Get platform default shell
@@ -52,17 +46,32 @@ export interface TerminalServerOptions extends ServerConfig {
   port?: number;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Path to Docker CLI (default: 'docker') */
+  dockerPath?: string;
+
+  // Session multiplexing options
+  /** Maximum clients per session (default: 10) */
+  maxClientsPerSession?: number;
+  /** Orphan session timeout in ms (default: 60000) */
+  orphanTimeout?: number;
+  /** History buffer size in characters (default: 50000) */
+  historySize?: number;
+  /** Enable session history (default: true) */
+  historyEnabled?: boolean;
+  /** Maximum total sessions (default: 100) */
+  maxSessionsTotal?: number;
 }
 
 /**
- * Terminal server class
+ * Terminal server class with session multiplexing support
  */
 export class TerminalServer {
   private config: Required<Omit<TerminalServerOptions, 'server' | 'port'>>;
-  private sessions = new Map<string, TerminalSession>();
+  private sessionManager: SessionManager;
   private wss: WebSocketServer | null = null;
   private pty: any = null;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+  private clientIds = new WeakMap<WebSocket, string>();
 
   constructor(options: TerminalServerOptions = {}) {
     this.config = {
@@ -74,10 +83,55 @@ export class TerminalServer {
       idleTimeout: options.idleTimeout || 30 * 60 * 1000, // 30 minutes
       path: options.path || '/terminal',
       verbose: options.verbose || false,
+      // Docker options
+      allowDockerExec: options.allowDockerExec || false,
+      allowedContainerPatterns: options.allowedContainerPatterns || [],
+      defaultContainerShell: options.defaultContainerShell || '/bin/bash',
+      dockerPath: options.dockerPath || 'docker',
+      // Multiplexing options
+      maxClientsPerSession: options.maxClientsPerSession || 10,
+      orphanTimeout: options.orphanTimeout || 60000,
+      historySize: options.historySize || 50000,
+      historyEnabled: options.historyEnabled ?? true,
+      maxSessionsTotal: options.maxSessionsTotal || 100,
     };
 
-    // Start cleanup interval
+    // Initialize session manager
+    this.sessionManager = new SessionManager({
+      maxClientsPerSession: this.config.maxClientsPerSession,
+      orphanTimeout: this.config.orphanTimeout,
+      historySize: this.config.historySize,
+      historyEnabled: this.config.historyEnabled,
+      maxSessionsTotal: this.config.maxSessionsTotal,
+      verbose: this.config.verbose,
+    });
+
+    // Handle session manager events
+    this.sessionManager.on('sessionClosed', (sessionId: string, reason: string) => {
+      this.log(`Session ${sessionId} closed: ${reason}`);
+    });
+
+    // Start cleanup interval for idle sessions
     this.cleanupInterval = setInterval(() => this.cleanupSessions(), 60000);
+  }
+
+  /**
+   * Generate a unique client ID
+   */
+  private generateClientId(): string {
+    return `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
+   * Get or create client ID for a WebSocket
+   */
+  private getClientId(ws: WebSocket): string {
+    let clientId = this.clientIds.get(ws);
+    if (!clientId) {
+      clientId = this.generateClientId();
+      this.clientIds.set(ws, clientId);
+    }
+    return clientId;
   }
 
   /**
@@ -135,6 +189,10 @@ export class TerminalServer {
    * Can be called directly for manual WebSocket upgrade handling
    */
   async handleConnection(ws: WebSocket, req: any): Promise<void> {
+    // Generate client ID
+    const clientId = this.getClientId(ws);
+    this.log(`Assigned client ID: ${clientId}`);
+
     // Load node-pty
     try {
       await this.initPty();
@@ -144,43 +202,45 @@ export class TerminalServer {
       return;
     }
 
+    // Send server info to client
+    this.sendServerInfo(ws);
+
     // Handle messages
     ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString()) as TerminalMessage;
-        this.handleMessage(ws, message);
+        this.handleMessage(ws, clientId, message);
       } catch (error) {
         this.log(`Invalid message: ${error}`, 'error');
       }
     });
 
     ws.on('close', () => {
-      this.log('Client disconnected');
-      // Clean up sessions for this WebSocket
-      for (const [sessionId, session] of this.sessions.entries()) {
-        if (session.ws === ws) {
-          this.closeSession(sessionId);
-        }
+      this.log(`Client ${clientId} disconnected`);
+      // Remove client from all sessions (sessions may survive if other clients connected)
+      const affectedSessions = this.sessionManager.removeClientFromAllSessions(clientId);
+      if (affectedSessions.length > 0) {
+        this.log(`Removed client from sessions: ${affectedSessions.join(', ')}`);
       }
     });
 
     ws.on('error', (error) => {
-      this.log(`WebSocket error: ${error.message}`, 'error');
+      this.log(`WebSocket error for client ${clientId}: ${error.message}`, 'error');
     });
   }
 
   /**
    * Handle message from client
    */
-  private handleMessage(ws: WebSocket, message: TerminalMessage): void {
+  private handleMessage(ws: WebSocket, clientId: string, message: TerminalMessage): void {
     switch (message.type) {
       case 'spawn':
-        this.spawnSession(ws, message.options || {});
+        this.spawnSession(ws, clientId, message.options || {});
         break;
 
       case 'data':
         if (message.sessionId) {
-          this.writeToSession(message.sessionId, message.data);
+          this.writeToSession(message.sessionId, clientId, message.data);
         }
         break;
 
@@ -192,14 +252,160 @@ export class TerminalServer {
 
       case 'close':
         if (message.sessionId) {
-          this.closeSession(message.sessionId);
+          this.closeSession(message.sessionId, clientId);
         }
+        break;
+
+      case 'listContainers':
+        this.listContainers(ws);
+        break;
+
+      // Session multiplexing messages
+      case 'listSessions':
+        this.handleListSessions(ws, (message as any).filter);
+        break;
+
+      case 'join':
+        this.handleJoinSession(ws, clientId, (message as any).options);
+        break;
+
+      case 'leave':
+        this.handleLeaveSession(ws, clientId, message.sessionId!);
         break;
 
       default:
         this.log(`Unknown message type: ${(message as any).type}`, 'warn');
     }
   }
+
+  // ===========================================================================
+  // Session Multiplexing Handlers
+  // ===========================================================================
+
+  /**
+   * Handle list sessions request
+   */
+  private handleListSessions(ws: WebSocket, filter?: SessionListFilter): void {
+    const sessions = this.sessionManager.getSessions(filter);
+    const sessionInfos: SharedSessionInfo[] = sessions.map((s) =>
+      this.sessionManager.toSharedSessionInfo(s)
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: 'sessionList',
+        sessions: sessionInfos,
+      })
+    );
+  }
+
+  /**
+   * Handle join session request
+   */
+  private handleJoinSession(
+    ws: WebSocket,
+    clientId: string,
+    options: JoinSessionOptions
+  ): void {
+    const session = this.sessionManager.getSession(options.sessionId);
+
+    if (!session) {
+      this.sendError(ws, `Session not found: ${options.sessionId}`);
+      return;
+    }
+
+    if (!session.accepting) {
+      this.sendError(ws, `Session is not accepting new clients`);
+      return;
+    }
+
+    // Add client to session
+    const success = this.sessionManager.addClient(options.sessionId, clientId, ws);
+    if (!success) {
+      this.sendError(ws, `Failed to join session: ${options.sessionId}`);
+      return;
+    }
+
+    // Get history if requested
+    let history: string | undefined;
+    if (options.requestHistory && session.historyEnabled) {
+      history = this.sessionManager.getHistory(
+        options.sessionId,
+        options.historyLimit
+      );
+    }
+
+    // Send joined response
+    ws.send(
+      JSON.stringify({
+        type: 'joined',
+        sessionId: options.sessionId,
+        session: this.sessionManager.toSharedSessionInfo(session),
+        history,
+      })
+    );
+
+    // Broadcast to other clients
+    this.sessionManager.broadcastToSession(
+      options.sessionId,
+      {
+        type: 'clientJoined',
+        sessionId: options.sessionId,
+        clientCount: session.clients.size,
+      },
+      clientId
+    );
+
+    // Send a newline to trigger a fresh prompt for the joining client
+    // This ensures the prompt is visible immediately after joining
+    if (session.pty) {
+      session.pty.write('\n');
+    }
+
+    this.log(`Client ${clientId} joined session ${options.sessionId}`);
+  }
+
+  /**
+   * Handle leave session request
+   */
+  private handleLeaveSession(
+    ws: WebSocket,
+    clientId: string,
+    sessionId: string
+  ): void {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) {
+      this.sendError(ws, `Session not found: ${sessionId}`);
+      return;
+    }
+
+    // Remove client from session
+    this.sessionManager.removeClient(sessionId, clientId);
+
+    // Send left response
+    ws.send(
+      JSON.stringify({
+        type: 'left',
+        sessionId,
+      })
+    );
+
+    // Broadcast to remaining clients
+    if (this.sessionManager.hasSession(sessionId)) {
+      const updatedSession = this.sessionManager.getSession(sessionId)!;
+      this.sessionManager.broadcastToSession(sessionId, {
+        type: 'clientLeft',
+        sessionId,
+        clientCount: updatedSession.clients.size,
+      });
+    }
+
+    this.log(`Client ${clientId} left session ${sessionId}`);
+  }
+
+  // ===========================================================================
+  // Validation Methods
+  // ===========================================================================
 
   /**
    * Validate shell path
@@ -233,28 +439,240 @@ export class TerminalServer {
   }
 
   /**
-   * Spawn a new terminal session
+   * Validate container name/ID against allowed patterns
    */
-  private spawnSession(ws: WebSocket, options: TerminalOptions): void {
-    const shell = options.shell || this.config.defaultShell;
-    const cwd = options.cwd || this.config.defaultCwd;
+  private isContainerAllowed(container: string): boolean {
+    // Docker exec must be enabled
+    if (!this.config.allowDockerExec) return false;
+
+    // If no patterns specified, all containers allowed (when Docker exec is enabled)
+    if (this.config.allowedContainerPatterns.length === 0) return true;
+
+    // Check against allowed patterns
+    return this.config.allowedContainerPatterns.some((pattern) => {
+      try {
+        const regex = new RegExp(pattern);
+        return regex.test(container);
+      } catch {
+        // If pattern is invalid regex, treat as literal string match
+        return container === pattern || container.startsWith(pattern);
+      }
+    });
+  }
+
+  // ===========================================================================
+  // Session Spawning
+  // ===========================================================================
+
+  /**
+   * Spawn a Docker exec session
+   */
+  private spawnDockerExecSession(
+    ws: WebSocket,
+    clientId: string,
+    options: TerminalOptions,
+    sessionId: string
+  ): SharedSession | null {
+    const container = options.container!;
+    const shell = options.containerShell || this.config.defaultContainerShell;
     const cols = options.cols || 80;
     const rows = options.rows || 24;
-    const env = options.env || {};
 
-    // Count sessions for this client
-    let clientSessions = 0;
-    for (const session of this.sessions.values()) {
-      if (session.ws === ws) clientSessions++;
+    // Build docker exec args
+    const args = ['exec', '-it'];
+
+    // Add user if specified
+    if (options.containerUser) {
+      args.push('-u', options.containerUser);
     }
 
-    if (clientSessions >= this.config.maxSessionsPerClient) {
+    // Add working directory if specified
+    if (options.containerCwd) {
+      args.push('-w', options.containerCwd);
+    }
+
+    // Add environment variables
+    if (options.env) {
+      for (const [key, value] of Object.entries(options.env)) {
+        args.push('-e', `${key}=${value}`);
+      }
+    }
+
+    // Add container and shell
+    args.push(container, shell);
+
+    this.log(`Spawning Docker exec: ${this.config.dockerPath} ${args.join(' ')}`);
+
+    try {
+      // Spawn PTY with docker exec
+      const ptyProcess = this.pty.spawn(this.config.dockerPath, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        env: process.env,
+      });
+
+      // Create session via SessionManager
+      const session = this.sessionManager.createSession({
+        id: sessionId,
+        type: 'docker-exec',
+        pty: ptyProcess,
+        shell,
+        cwd: options.containerCwd || '/',
+        cols,
+        rows,
+        ownerId: clientId,
+        ownerWs: ws,
+        container,
+        label: options.label,
+        allowJoin: options.allowJoin,
+        enableHistory: options.enableHistory,
+      });
+
+      return session;
+    } catch (error) {
+      this.log(`Failed to spawn Docker exec: ${error}`, 'error');
+      this.sendError(
+        ws,
+        `Failed to exec into container: ${(error as Error).message}`,
+        sessionId
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Spawn a Docker attach session (connects to container's main process)
+   */
+  private spawnDockerAttachSession(
+    ws: WebSocket,
+    clientId: string,
+    options: TerminalOptions,
+    sessionId: string
+  ): SharedSession | null {
+    const container = options.container!;
+    const cols = options.cols || 80;
+    const rows = options.rows || 24;
+
+    // Build docker attach args
+    // --sig-proxy=false prevents signals from being proxied to the container
+    // --detach-keys allows detaching without killing the session
+    const args = [
+      'attach',
+      '--sig-proxy=false',
+      '--detach-keys=ctrl-p,ctrl-q',
+      container,
+    ];
+
+    this.log(`Spawning Docker attach: ${this.config.dockerPath} ${args.join(' ')}`);
+
+    try {
+      // Spawn PTY with docker attach
+      const ptyProcess = this.pty.spawn(this.config.dockerPath, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        env: process.env,
+      });
+
+      // Create session via SessionManager
+      const session = this.sessionManager.createSession({
+        id: sessionId,
+        type: 'docker-attach',
+        pty: ptyProcess,
+        shell: 'attach',
+        cwd: '/',
+        cols,
+        rows,
+        ownerId: clientId,
+        ownerWs: ws,
+        container,
+        label: options.label,
+        allowJoin: options.allowJoin,
+        enableHistory: options.enableHistory,
+      });
+
+      return session;
+    } catch (error) {
+      this.log(`Failed to spawn Docker attach: ${error}`, 'error');
+      this.sendError(
+        ws,
+        `Failed to attach to container: ${(error as Error).message}`,
+        sessionId
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Spawn a new terminal session
+   */
+  private spawnSession(
+    ws: WebSocket,
+    clientId: string,
+    options: TerminalOptions
+  ): void {
+    // Check client session limit
+    const clientSessions = this.sessionManager.getClientSessions(clientId);
+    if (clientSessions.length >= this.config.maxSessionsPerClient) {
       this.sendError(
         ws,
         `Maximum sessions (${this.config.maxSessionsPerClient}) reached`
       );
       return;
     }
+
+    const sessionId = `term-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Check if this is a Docker request
+    if (options.container) {
+      // Validate container access
+      if (!this.isContainerAllowed(options.container)) {
+        this.sendError(
+          ws,
+          `Container access not allowed: ${options.container}. Docker exec ${this.config.allowDockerExec ? 'is enabled but container pattern not matched' : 'is disabled'}.`
+        );
+        return;
+      }
+
+      let session: SharedSession | null;
+
+      // Check if attach mode requested
+      if (options.attachMode) {
+        session = this.spawnDockerAttachSession(ws, clientId, options, sessionId);
+      } else {
+        session = this.spawnDockerExecSession(ws, clientId, options, sessionId);
+      }
+
+      if (!session) return;
+
+      this.setupSessionHandlers(session);
+
+      // Notify client
+      ws.send(
+        JSON.stringify({
+          type: 'spawned',
+          sessionId,
+          shell: session.shell,
+          cwd: session.cwd,
+          cols: session.cols,
+          rows: session.rows,
+          container: session.container,
+        })
+      );
+
+      this.log(
+        `Docker ${options.attachMode ? 'attach' : 'exec'} session spawned: ${sessionId} (container: ${session.container})`
+      );
+      return;
+    }
+
+    // Regular local shell session
+    const shell = options.shell || this.config.defaultShell;
+    const cwd = options.cwd || this.config.defaultCwd;
+    const cols = options.cols || 80;
+    const rows = options.rows || 24;
+    const env = options.env || {};
 
     // Validate shell
     if (!this.isShellAllowed(shell)) {
@@ -281,47 +699,23 @@ export class TerminalServer {
         env: { ...process.env, ...env },
       });
 
-      const sessionId = `term-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const now = new Date();
-
-      // Store session
-      const session: TerminalSession = {
+      // Create session via SessionManager
+      const session = this.sessionManager.createSession({
         id: sessionId,
+        type: 'local',
         pty: ptyProcess,
-        ws,
         shell,
         cwd,
         cols,
         rows,
-        createdAt: now,
-        lastActivity: now,
-      };
-      this.sessions.set(sessionId, session);
-
-      // Handle PTY output
-      ptyProcess.onData((data: string) => {
-        session.lastActivity = new Date();
-        ws.send(
-          JSON.stringify({
-            type: 'data',
-            sessionId,
-            data,
-          })
-        );
+        ownerId: clientId,
+        ownerWs: ws,
+        label: options.label,
+        allowJoin: options.allowJoin,
+        enableHistory: options.enableHistory,
       });
 
-      // Handle PTY exit
-      ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
-        ws.send(
-          JSON.stringify({
-            type: 'exit',
-            sessionId,
-            exitCode,
-          })
-        );
-        this.sessions.delete(sessionId);
-        this.log(`Session exited: ${sessionId} (code: ${exitCode})`);
-      });
+      this.setupSessionHandlers(session);
 
       // Notify client
       ws.send(
@@ -343,16 +737,66 @@ export class TerminalServer {
   }
 
   /**
+   * Setup PTY event handlers for a session
+   */
+  private setupSessionHandlers(session: SharedSession): void {
+    const sessionId = session.id;
+
+    // Handle PTY output
+    session.pty.onData((data: string) => {
+      // Update activity
+      this.sessionManager.updateSessionActivity(sessionId);
+
+      // Store in history buffer
+      this.sessionManager.appendHistory(sessionId, data);
+
+      // Broadcast to all connected clients
+      this.sessionManager.broadcastToSession(sessionId, {
+        type: 'data',
+        sessionId,
+        data,
+      });
+    });
+
+    // Handle PTY exit
+    session.pty.onExit(({ exitCode }: { exitCode: number }) => {
+      // Broadcast exit to all clients
+      this.sessionManager.broadcastToSession(sessionId, {
+        type: 'exit',
+        sessionId,
+        exitCode,
+      });
+
+      // Also broadcast session closed
+      this.sessionManager.broadcastToSession(sessionId, {
+        type: 'sessionClosed',
+        sessionId,
+        reason: 'process_exit',
+      });
+
+      // Close the session
+      this.sessionManager.closeSession(sessionId, 'process_exit');
+      this.log(`Session exited: ${sessionId} (code: ${exitCode})`);
+    });
+  }
+
+  /**
    * Write data to session
    */
-  private writeToSession(sessionId: string, data: string): void {
-    const session = this.sessions.get(sessionId);
+  private writeToSession(sessionId: string, clientId: string, data: string): void {
+    const session = this.sessionManager.getSession(sessionId);
     if (!session) {
       this.log(`Session not found: ${sessionId}`, 'warn');
       return;
     }
 
-    session.lastActivity = new Date();
+    // Verify client is in session
+    if (!this.sessionManager.isClientInSession(sessionId, clientId)) {
+      this.log(`Client ${clientId} not in session ${sessionId}`, 'warn');
+      return;
+    }
+
+    this.sessionManager.updateClientActivity(sessionId, clientId);
     session.pty.write(data);
   }
 
@@ -360,7 +804,7 @@ export class TerminalServer {
    * Resize session
    */
   private resizeSession(sessionId: string, cols: number, rows: number): void {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessionManager.getSession(sessionId);
     if (!session) {
       this.log(`Session not found: ${sessionId}`, 'warn');
       return;
@@ -372,20 +816,30 @@ export class TerminalServer {
   }
 
   /**
-   * Close session
+   * Close session (only owner can close, or force close)
    */
-  private closeSession(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
+  private closeSession(sessionId: string, clientId: string): void {
+    const session = this.sessionManager.getSession(sessionId);
     if (!session) return;
 
-    try {
-      session.pty.kill();
-    } catch (error) {
-      this.log(`Error killing PTY: ${error}`, 'error');
+    // Check if client is the owner
+    if (session.owner !== clientId) {
+      this.log(`Client ${clientId} attempted to close session owned by ${session.owner}`, 'warn');
+      // Just remove the client from the session instead
+      this.sessionManager.removeClient(sessionId, clientId);
+      return;
     }
 
-    this.sessions.delete(sessionId);
-    this.log(`Session closed: ${sessionId}`);
+    // Broadcast session closed to all clients
+    this.sessionManager.broadcastToSession(sessionId, {
+      type: 'sessionClosed',
+      sessionId,
+      reason: 'owner_closed',
+    });
+
+    // Close the session
+    this.sessionManager.closeSession(sessionId, 'owner_closed');
+    this.log(`Session closed by owner: ${sessionId}`);
   }
 
   /**
@@ -395,18 +849,19 @@ export class TerminalServer {
     if (this.config.idleTimeout === 0) return;
 
     const now = Date.now();
-    for (const [sessionId, session] of this.sessions.entries()) {
+    for (const session of this.sessionManager.getSessions()) {
       const idleTime = now - session.lastActivity.getTime();
       if (idleTime > this.config.idleTimeout) {
-        this.log(`Closing inactive session: ${sessionId}`);
-        session.ws.send(
-          JSON.stringify({
-            type: 'exit',
-            sessionId,
-            exitCode: -1,
-          })
-        );
-        this.closeSession(sessionId);
+        this.log(`Closing inactive session: ${session.id}`);
+
+        // Broadcast to all clients
+        this.sessionManager.broadcastToSession(session.id, {
+          type: 'exit',
+          sessionId: session.id,
+          exitCode: -1,
+        });
+
+        this.sessionManager.closeSession(session.id, 'idle_timeout');
       }
     }
   }
@@ -444,17 +899,113 @@ export class TerminalServer {
   }
 
   /**
-   * Get all active sessions
+   * Send server info to client
+   */
+  private sendServerInfo(ws: WebSocket): void {
+    const info: ServerInfo = {
+      dockerEnabled: this.config.allowDockerExec,
+      allowedShells: this.config.allowedShells,
+      defaultShell: this.config.defaultShell,
+      defaultContainerShell: this.config.defaultContainerShell,
+    };
+
+    ws.send(
+      JSON.stringify({
+        type: 'serverInfo',
+        info,
+      })
+    );
+  }
+
+  /**
+   * List available Docker containers
+   */
+  private listContainers(ws: WebSocket): void {
+    if (!this.config.allowDockerExec) {
+      ws.send(
+        JSON.stringify({
+          type: 'containerList',
+          containers: [],
+        })
+      );
+      return;
+    }
+
+    // Run docker ps to get running containers
+    exec(
+      `${this.config.dockerPath} ps --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.State}}"`,
+      (error, stdout, stderr) => {
+        if (error) {
+          this.log(`Failed to list containers: ${error.message}`, 'error');
+          ws.send(
+            JSON.stringify({
+              type: 'containerList',
+              containers: [],
+            })
+          );
+          return;
+        }
+
+        const containers: ContainerInfo[] = [];
+        const lines = stdout.trim().split('\n').filter((line) => line.trim());
+
+        for (const line of lines) {
+          const [id, name, image, status, state] = line.split('\t');
+          if (!id) continue;
+
+          // Check if container matches allowed patterns
+          if (this.isContainerAllowed(name) || this.isContainerAllowed(id)) {
+            containers.push({
+              id,
+              name,
+              image,
+              status,
+              state: (state as ContainerInfo['state']) || 'unknown',
+            });
+          }
+        }
+
+        ws.send(
+          JSON.stringify({
+            type: 'containerList',
+            containers,
+          })
+        );
+
+        this.log(`Listed ${containers.length} containers`);
+      }
+    );
+  }
+
+  /**
+   * Get all active sessions (for external access)
    */
   getSessions(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map((session) => ({
+    return this.sessionManager.getSessions().map((session) => ({
       sessionId: session.id,
       shell: session.shell,
       cwd: session.cwd,
       cols: session.cols,
       rows: session.rows,
       createdAt: session.createdAt,
+      container: session.container,
     }));
+  }
+
+  /**
+   * Get all active sessions with multiplexing info
+   */
+  getSharedSessions(filter?: SessionListFilter): SharedSessionInfo[] {
+    return this.sessionManager
+      .getSessions(filter)
+      .map((s) => this.sessionManager.toSharedSessionInfo(s));
+  }
+
+  /**
+   * Get session manager statistics
+   */
+  getStats(): { sessionCount: number; clientCount: number; orphanedCount: number } {
+    return this.sessionManager.getStats();
   }
 
   /**
@@ -467,10 +1018,8 @@ export class TerminalServer {
       this.cleanupInterval = null;
     }
 
-    // Close all sessions
-    for (const sessionId of this.sessions.keys()) {
-      this.closeSession(sessionId);
-    }
+    // Cleanup session manager
+    this.sessionManager.cleanup();
 
     // Close WebSocket server
     if (this.wss) {

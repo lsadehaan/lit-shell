@@ -1,0 +1,13 @@
+{
+  "name": "lit-shell-docker-example",
+  "version": "1.0.0",
+  "description": "Example: Connect to Docker containers with lit-shell",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "lit-shell.js": "file:../..",
+    "node-pty": "^1.0.0"
+  }
+}
