@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-02-01
+
+### Added
+
+- **Mobile Support**: Auto-detect mobile devices and show touch keyboard
+  - Termux-style layout: ESC, arrows, HOME/END, PGUP/PGDN, TAB
+  - Sticky CTRL and ALT modifiers
+  - Collapsible extra row with common control sequences (^C, ^D, ^Z, ^L, ^A, ^E, ^R)
+  - Hide/show toggle for entire keyboard
+  - Responsive viewport detection with media query listener
+- **Reconnect Dialog**: After WebSocket reconnection, shows dialog to rejoin previous session
+  - Saves session ID on disconnect
+  - Checks if session still exists after reconnect
+  - Option to rejoin with history or start fresh
+- **Session Persistence Options**: Connection panel now includes
+  - Configurable orphan timeout (1 min to 1 week)
+  - Tmux integration checkbox for permanent persistence
+- **Updated Font Stack**: Terminal now uses Cascadia Mono as primary font for better cross-platform consistency
+
+### Changed
+
+- Improved README documentation with all new features
+- Updated feature list to include Docker, multiplexing, mobile, and persistence
+
 ## [1.1.0] - 2025-01-09
 
 ### Added

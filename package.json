@@ -1,6 +1,6 @@
 {
   "name": "lit-shell.js",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "WebSocket-based terminal for Node.js - the truth is in your shell",
   "type": "module",
   "main": "dist/server/index.js",

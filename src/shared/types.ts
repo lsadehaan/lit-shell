@@ -41,6 +41,14 @@ export interface TerminalOptions {
   allowJoin?: boolean;
   /** Enable history buffer for replay on join (default: true) */
   enableHistory?: boolean;
+
+  // Persistence options
+  /** Orphan timeout in ms - how long session lives after all clients disconnect (0 = use server default) */
+  orphanTimeout?: number;
+  /** Use tmux for persistent session (survives disconnects indefinitely) */
+  useTmux?: boolean;
+  /** tmux session name (default: auto-generated) */
+  tmuxSession?: string;
 }
 
 /**

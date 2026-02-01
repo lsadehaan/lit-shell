@@ -2,6 +2,7 @@
  * lit-shell.js server exports
  */
 
+export { VERSION } from '../version.js';
 export { TerminalServer, createTerminalMiddleware } from './terminal-server.js';
 export type { TerminalServerOptions } from './terminal-server.js';
 

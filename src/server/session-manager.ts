@@ -76,6 +76,10 @@ export interface SharedSession {
 
   // Orphan handling
   orphanedAt: Date | null;
+  /** Per-session orphan timeout (overrides server default if set) */
+  orphanTimeout?: number;
+  /** Whether this session uses tmux (survives orphan indefinitely) */
+  useTmux?: boolean;
 }
 
 /**
@@ -142,6 +146,8 @@ export class SessionManager extends EventEmitter {
     label?: string;
     allowJoin?: boolean;
     enableHistory?: boolean;
+    orphanTimeout?: number;
+    useTmux?: boolean;
   }): SharedSession {
     if (this.sessions.size >= this.config.maxSessionsTotal) {
       throw new Error('Maximum number of sessions reached');
@@ -167,6 +173,8 @@ export class SessionManager extends EventEmitter {
       historyBuffer: new CircularBuffer(this.config.historySize),
       historyEnabled: options.enableHistory !== false && this.config.historyEnabled,
       orphanedAt: null,
+      orphanTimeout: options.orphanTimeout,
+      useTmux: options.useTmux,
     };
 
     // Add owner as first client
@@ -516,7 +524,18 @@ export class SessionManager extends EventEmitter {
 
   private handleOrphanedSession(session: SharedSession): void {
     session.orphanedAt = new Date();
-    this.log(`Session ${session.id} is now orphaned, starting cleanup timer`);
+
+    // tmux sessions persist indefinitely - don't close them on orphan
+    if (session.useTmux) {
+      this.log(`Session ${session.id} is orphaned but uses tmux - keeping alive indefinitely`);
+      this.emit('sessionOrphaned', session.id);
+      return;
+    }
+
+    // Use session-specific timeout if set, otherwise use config default
+    const timeout = session.orphanTimeout ?? this.config.orphanTimeout;
+
+    this.log(`Session ${session.id} is now orphaned, closing in ${timeout}ms`);
     this.emit('sessionOrphaned', session.id);
 
     // Start orphan timer
@@ -526,7 +545,7 @@ export class SessionManager extends EventEmitter {
         this.log(`Orphan timeout for session ${session.id}, closing`);
         this.closeSession(session.id, 'orphan_timeout');
       }
-    }, this.config.orphanTimeout);
+    }, timeout);
 
     this.orphanTimers.set(session.id, timer);
   }

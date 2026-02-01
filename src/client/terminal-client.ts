@@ -53,6 +53,8 @@ export class TerminalClient {
   private serverInfo: ServerInfo | null = null;
   private reconnectAttempts = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private previousSessionId: string | null = null;
+  private isReconnecting = false;
 
   // Event handlers
   private connectHandlers: (() => void)[] = [];
@@ -70,6 +72,7 @@ export class TerminalClient {
   private clientJoinedHandlers: ((sessionId: string, clientCount: number) => void)[] = [];
   private clientLeftHandlers: ((sessionId: string, clientCount: number) => void)[] = [];
   private sessionClosedHandlers: ((sessionId: string, reason: string) => void)[] = [];
+  private reconnectWithSessionHandlers: ((sessionId: string) => void)[] = [];
 
   // Promise resolvers for spawn/join
   private spawnResolve: ((info: SessionInfo) => void) | null = null;
@@ -111,12 +114,24 @@ export class TerminalClient {
         this.state = 'connected';
         this.reconnectAttempts = 0;
         this.connectHandlers.forEach((handler) => handler());
+
+        // Check for previous session on reconnect
+        if (this.isReconnecting && this.previousSessionId) {
+          this.checkPreviousSessionAndNotify();
+        }
+        this.isReconnecting = false;
+
         resolve();
       };
 
       this.ws.onclose = () => {
         const wasConnected = this.state === 'connected';
         this.state = 'disconnected';
+
+        // Save previous session ID before clearing (for reconnect dialog)
+        if (this.sessionId) {
+          this.previousSessionId = this.sessionId;
+        }
         this.sessionId = null;
         this.sessionInfo = null;
 
@@ -126,6 +141,7 @@ export class TerminalClient {
 
         // Attempt reconnection
         if (this.config.reconnect && this.reconnectAttempts < this.config.maxReconnectAttempts) {
+          this.isReconnecting = true;
           this.scheduleReconnect();
         }
       };
@@ -678,5 +694,57 @@ export class TerminalClient {
    */
   getServerInfo(): ServerInfo | null {
     return this.serverInfo;
+  }
+
+  /**
+   * Get previous session ID (available after disconnect)
+   */
+  getPreviousSessionId(): string | null {
+    return this.previousSessionId;
+  }
+
+  /**
+   * Clear previous session ID (call after user declines to rejoin)
+   */
+  clearPreviousSessionId(): void {
+    this.previousSessionId = null;
+  }
+
+  /**
+   * Called when reconnected and previous session is available
+   */
+  onReconnectWithSession(handler: (sessionId: string) => void): void {
+    this.reconnectWithSessionHandlers.push(handler);
+  }
+
+  /**
+   * Check if previous session exists and notify handlers
+   */
+  private async checkPreviousSessionAndNotify(): Promise<void> {
+    if (!this.previousSessionId) return;
+
+    try {
+      const sessions = await this.listSessions();
+      const previousSession = sessions.find(
+        (s) => s.sessionId === this.previousSessionId
+      );
+
+      if (previousSession && previousSession.accepting) {
+        // Previous session still exists and accepting clients
+        this.reconnectWithSessionHandlers.forEach((handler) => {
+          try {
+            handler(this.previousSessionId!);
+          } catch (e) {
+            console.error('[lit-shell] Error in reconnectWithSession handler:', e);
+          }
+        });
+      } else {
+        // Session no longer exists or not accepting
+        this.previousSessionId = null;
+      }
+    } catch (e) {
+      console.error('[lit-shell] Failed to check previous session:', e);
+      this.previousSessionId = null;
+    }
   }
 }

@@ -291,6 +291,8 @@ export class TerminalServer {
       this.sessionManager.toSharedSessionInfo(s)
     );
 
+    this.log(`Listed ${sessions.length} sessions: ${sessions.map(s => s.id).join(', ')}`);
+
     ws.send(
       JSON.stringify({
         type: 'sessionList',
@@ -307,9 +309,12 @@ export class TerminalServer {
     clientId: string,
     options: JoinSessionOptions
   ): void {
+    this.log(`Client ${clientId} attempting to join session: ${options.sessionId}`);
     const session = this.sessionManager.getSession(options.sessionId);
 
     if (!session) {
+      const allSessions = this.sessionManager.getSessions();
+      this.log(`Session not found: ${options.sessionId}. Available sessions: ${allSessions.map(s => s.id).join(', ') || 'none'}`, 'warn');
       this.sendError(ws, `Session not found: ${options.sessionId}`);
       return;
     }
@@ -498,10 +503,21 @@ export class TerminalServer {
       }
     }
 
-    // Add container and shell
-    args.push(container, shell);
+    // Add container
+    args.push(container);
 
-    this.log(`Spawning Docker exec: ${this.config.dockerPath} ${args.join(' ')}`);
+    // Check if tmux mode is enabled
+    if (options.useTmux) {
+      // Use tmux for persistent session
+      // tmux new-session -A -s <name> means "attach if exists, create if not"
+      const tmuxSessionName = options.tmuxSession || `ls-${sessionId.substring(0, 8)}`;
+      args.push('tmux', 'new-session', '-A', '-s', tmuxSessionName);
+      this.log(`Spawning Docker exec with tmux: ${this.config.dockerPath} ${args.join(' ')}`);
+    } else {
+      // Regular shell
+      args.push(shell);
+      this.log(`Spawning Docker exec: ${this.config.dockerPath} ${args.join(' ')}`);
+    }
 
     try {
       // Spawn PTY with docker exec
@@ -517,7 +533,7 @@ export class TerminalServer {
         id: sessionId,
         type: 'docker-exec',
         pty: ptyProcess,
-        shell,
+        shell: options.useTmux ? 'tmux' : shell,
         cwd: options.containerCwd || '/',
         cols,
         rows,
@@ -527,6 +543,8 @@ export class TerminalServer {
         label: options.label,
         allowJoin: options.allowJoin,
         enableHistory: options.enableHistory,
+        orphanTimeout: options.orphanTimeout,
+        useTmux: options.useTmux,
       });
 
       return session;
@@ -713,6 +731,7 @@ export class TerminalServer {
         label: options.label,
         allowJoin: options.allowJoin,
         enableHistory: options.enableHistory,
+        orphanTimeout: options.orphanTimeout,
       });
 
       this.setupSessionHandlers(session);
