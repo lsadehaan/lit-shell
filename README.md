@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/lsadehaan/lit-shell/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/lsadehaan/lit-shell/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/lsadehaan/lit-shell/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/lsadehaan/lit-shell/actions/workflows/codeql.yml)
-[![Pages](https://github.com/lsadehaan/lit-shell/actions/workflows/pages.yml/badge.svg?branch=master)](https://lsadehaan.github.io/lit-shell/)
+[![Pages](https://github.com/lsadehaan/lit-shell/actions/workflows/pages.yml/badge.svg?branch=master)](https://www.idnteq.net/lit-shell/)
 [![npm](https://img.shields.io/npm/v/lit-shell.js)](https://www.npmjs.com/package/lit-shell.js)
 [![license](https://img.shields.io/github/license/lsadehaan/lit-shell)](LICENSE)
 
@@ -12,7 +12,7 @@ A WebSocket terminal toolkit for web applications. It includes a Node.js
 server backed by `node-pty`, a framework-agnostic client, and a ready-to-use
 Lit web component.
 
-Try the [live browser-only demo](https://lsadehaan.github.io/lit-shell/). It
+Try the [live browser-only demo](https://www.idnteq.net/lit-shell/). It
 uses the real component and client with a deterministic shell emulator that
 runs entirely in your browser. It never opens a WebSocket and cannot execute
 operating-system commands. A real terminal still requires the secured
@@ -762,7 +762,7 @@ vulnerability-reporting process.
 
 ## Examples
 
-The [browser-only demo](https://lsadehaan.github.io/lit-shell/) provides a safe,
+The [browser-only demo](https://www.idnteq.net/lit-shell/) provides a safe,
 serverless simulation on GitHub Pages. For complete server-backed examples,
 see the [examples](./examples) directory:
 

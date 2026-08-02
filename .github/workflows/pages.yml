@@ -94,7 +94,10 @@ jobs:
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
         run: |
           case "$PAGE_URL" in
-            https://lsadehaan.github.io/lit-shell/) ;;
+            https://lsadehaan.github.io/lit-shell/|https://www.idnteq.net/lit-shell/) ;;
+            http://www.idnteq.net/lit-shell/)
+              PAGE_URL="https://${PAGE_URL#http://}"
+              ;;
             *) echo "Unexpected Pages URL: $PAGE_URL" >&2; exit 1 ;;
           esac
           for attempt in $(seq 1 12); do
