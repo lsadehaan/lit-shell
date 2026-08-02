@@ -182,6 +182,7 @@ describe('remote demo deployment configuration', () => {
     expect(REMOTE_DEMO_LIMITS).toMatchObject({
       admissionCapacity: 4,
       idleTimeoutMs: 300_000,
+      maxConnectionMessages: 4_096,
       maxVerificationBurst: 12,
       resetIntervalMs: 300_000,
       sessionLifetimeMs: 300_000,

@@ -181,7 +181,9 @@ for (const resource of ipcResources) {
   assert.deepEqual(owner, { gid: 65_532, uid: 65_532 });
 }
 
-const closes = clients.map((client) => once(client.socket, 'close'));
+const closes = clients.map((client) =>
+  waitForSocketEvent(client.socket, 'close'),
+);
 process.kill(1, 'SIGUSR2');
 for (const closed of closes) {
   const [code, reason] = await closed;
@@ -344,8 +346,10 @@ async function expectUpgradeRejected(
   origin = browserOrigin,
 ) {
   const socket = new WebSocket(url, protocols, { origin });
-  socket.on('error', () => undefined);
-  const [request, response] = await once(socket, 'unexpected-response');
+  const [request, response] = await waitForSocketEvent(
+    socket,
+    'unexpected-response',
+  );
   assert.equal(response.statusCode, expectedStatus);
   response.resume();
   request.destroy();
@@ -373,7 +377,7 @@ async function connect(token) {
       );
     }
   });
-  await once(socket, 'open');
+  await waitForSocketEvent(socket, 'open');
   return {
     socket,
     send(message) {
@@ -393,11 +397,30 @@ async function connect(token) {
     },
     async close() {
       if (socket.readyState === WebSocket.CLOSED) return;
-      const closed = once(socket, 'close');
+      const closed = waitForSocketEvent(socket, 'close');
       socket.close();
       await closed;
     },
   };
+}
+
+async function waitForSocketEvent(socket, event, timeout = 5_000) {
+  let timer;
+  try {
+    return await Promise.race([
+      once(socket, event),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Timed out waiting for WebSocket ${event}`));
+        }, timeout);
+      }),
+    ]);
+  } catch (error) {
+    socket.terminate();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function waitUntil(check, timeout) {

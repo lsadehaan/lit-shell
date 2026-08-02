@@ -59,33 +59,33 @@ describe('TerminalServer server-owned spawn policy (black-box)', () => {
           TERM: 'xterm-256color',
         },
       });
+      const client = await server.connect();
+      const from = client.mark();
+
+      client.send({
+        type: 'spawn',
+        options: { cols: 91, rows: 27 },
+      });
+
+      const spawned = await client.waitForType('spawned', { from });
+      expect(spawned).toMatchObject({ cols: 91, rows: 27 });
+      const sessionId = spawned.sessionId as string;
+      const outputFrom = client.mark();
+      client.send({
+        type: 'data',
+        sessionId,
+        data: 'stty -echo; env\n',
+      });
+      const output = await client.waitForOutput(
+        'LIT_SHELL_SAFE_ENV=server-owned',
+        { from: outputFrom, sessionId },
+      );
+      expect(output).not.toContain(secretName);
+      expect(output).not.toContain('host-secret-value');
     } finally {
       if (previousSecret === undefined) delete process.env[secretName];
       else process.env[secretName] = previousSecret;
     }
-    const client = await server.connect();
-    const from = client.mark();
-
-    client.send({
-      type: 'spawn',
-      options: { cols: 91, rows: 27 },
-    });
-
-    const spawned = await client.waitForType('spawned', { from });
-    expect(spawned).toMatchObject({ cols: 91, rows: 27 });
-    const sessionId = spawned.sessionId as string;
-    const outputFrom = client.mark();
-    client.send({
-      type: 'data',
-      sessionId,
-      data: 'stty -echo; env\n',
-    });
-    const output = await client.waitForOutput(
-      'LIT_SHELL_SAFE_ENV=server-owned',
-      { from: outputFrom, sessionId },
-    );
-    expect(output).not.toContain(secretName);
-    expect(output).not.toContain('host-secret-value');
   });
 
   it.each(['localUid', 'localGid'])(

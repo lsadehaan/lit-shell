@@ -34,6 +34,7 @@ test('derives exact HTTPS and WSS CSP sources from one normalized origin', () =>
 for (const candidate of [
   'http://demo.example.test',
   'https://user@demo.example.test',
+  'https://demo.example.test/',
   'https://demo.example.test/path',
   'https://demo.example.test?query=yes',
   'https://demo.example.test/#fragment',

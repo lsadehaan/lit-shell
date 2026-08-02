@@ -265,7 +265,7 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
   await expect(
     page.getByRole('button', { name: 'Start real demo' }),
   ).toBeFocused();
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(1_250);
   expect(routedWebSocketUrls).toHaveLength(1);
 });
 

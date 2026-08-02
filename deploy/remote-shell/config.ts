@@ -9,7 +9,7 @@ export const REMOTE_DEMO_LIMITS = Object.freeze({
   maxBufferedOutputBytes: 128 * 1024,
   maxConcurrentVerifications: 4,
   maxConnectionBytes: 128 * 1024,
-  maxConnectionMessages: 0,
+  maxConnectionMessages: 4_096,
   maxInputBytes: 64 * 1024,
   maxMessageBytes: 8 * 1024,
   maxVerificationBurst: 12,

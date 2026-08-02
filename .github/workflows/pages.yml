@@ -115,17 +115,11 @@ jobs:
           if [ -z "$REMOTE_DEMO_ORIGIN" ]; then
             exit 0
           fi
-          redirect_status="$(curl --silent --show-error --max-time 30 \
-            --proto '=http' --output /dev/null --dump-header redirect.headers \
-            --write-out '%{http_code}' http://www.idnteq.net/lit-shell/)"
-          redirect_location="$(awk '
-            BEGIN { IGNORECASE = 1 }
-            /^location:/ {
-              sub(/^[^:]*:[[:space:]]*/, "")
-              sub(/\r$/, "")
-              print
-            }
-          ' redirect.headers | tail -n 1)"
+          redirect_result="$(curl --silent --show-error --max-time 30 \
+            --proto '=http' --output /dev/null \
+            --write-out '%{http_code} %{redirect_url}' \
+            http://www.idnteq.net/lit-shell/)"
+          read -r redirect_status redirect_location <<< "$redirect_result"
           if { [ "$redirect_status" != 301 ] \
             && [ "$redirect_status" != 308 ]; } \
             || [ "$redirect_location" != https://www.idnteq.net/lit-shell/ ]; then
@@ -191,17 +185,10 @@ jobs:
           case "$PAGE_URL" in
             https://lsadehaan.github.io/lit-shell/|https://www.idnteq.net/lit-shell/) ;;
             http://www.idnteq.net/lit-shell/)
-              redirect_status="$(curl --silent --show-error --max-time 30 \
-                --proto '=http' --output /dev/null --dump-header redirect.headers \
-                --write-out '%{http_code}' "$PAGE_URL")"
-              redirect_location="$(awk '
-                BEGIN { IGNORECASE = 1 }
-                /^location:/ {
-                  sub(/^[^:]*:[[:space:]]*/, "")
-                  sub(/\r$/, "")
-                  print
-                }
-              ' redirect.headers | tail -n 1)"
+              redirect_result="$(curl --silent --show-error --max-time 30 \
+                --proto '=http' --output /dev/null \
+                --write-out '%{http_code} %{redirect_url}' "$PAGE_URL")"
+              read -r redirect_status redirect_location <<< "$redirect_result"
               if { [ "$redirect_status" != 301 ] \
                 && [ "$redirect_status" != 308 ]; } \
                 || [ "$redirect_location" != https://www.idnteq.net/lit-shell/ ]; then
