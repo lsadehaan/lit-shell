@@ -11,6 +11,7 @@ const turnstileScriptUrl =
   'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 const turnstileAction = 'remote_shell_admission';
 const turnstileLoadTimeoutMs = 20_000;
+const admissionRequestTimeoutMs = 10_000;
 const wakeDeadlineMs = 90_000;
 
 interface AdmissionResponse {
@@ -147,15 +148,33 @@ async function requestAdmission(
   origin: URL,
   turnstileToken: string,
 ): Promise<TimedAdmissionResponse> {
-  const response = await fetch(new URL('/v1/admissions', origin), {
-    body: new URLSearchParams({ turnstileToken }),
-    cache: 'no-store',
-    credentials: 'omit',
-    method: 'POST',
-    mode: 'cors',
-    redirect: 'error',
-    referrerPolicy: 'no-referrer',
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    admissionRequestTimeoutMs,
+  );
+  let response: Response;
+  try {
+    response = await fetch(new URL('/v1/admissions', origin), {
+      body: new URLSearchParams({ turnstileToken }),
+      cache: 'no-store',
+      credentials: 'omit',
+      method: 'POST',
+      mode: 'cors',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error('The admission request timed out. Please try again.', {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (response.status === 403) {
     throw new Error('Human verification was not accepted. Please try again.');
   }
@@ -396,6 +415,7 @@ async function startRemoteDemo(): Promise<void> {
   starting = true;
   startButton.disabled = true;
   updateStatus('Complete the human check to start the demo…', 'loading');
+  let startupTerminal: LitShellTerminal | undefined;
   try {
     const origin = configuredOrigin();
     const turnstileToken = await completeHumanCheck();
@@ -441,11 +461,20 @@ async function startRemoteDemo(): Promise<void> {
       sessionFailed(terminal, message);
     });
 
+    startupTerminal = terminal;
     activeTerminal = terminal;
     mount.replaceChildren(terminal);
     await terminal.connect();
+    if (activeTerminal !== terminal) {
+      releaseTerminal(terminal);
+      return;
+    }
     terminal.clearProtocols();
     await terminal.spawn({ allowJoin: false, cols: 80, rows: 24 });
+    if (activeTerminal !== terminal) {
+      releaseTerminal(terminal);
+      return;
+    }
     terminal.shadowRoot
       ?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
       ?.setAttribute('aria-label', 'Remote shell terminal input');
@@ -453,8 +482,9 @@ async function startRemoteDemo(): Promise<void> {
     startCountdown(admission);
     updateStatus('Connected to the shared disposable container.', 'ready');
   } catch (error) {
+    if (startupTerminal && activeTerminal !== startupTerminal) return;
     removeTurnstile();
-    if (activeTerminal) releaseTerminal(activeTerminal);
+    if (startupTerminal) releaseTerminal(startupTerminal);
     else restoreIdleMount();
     startButton.disabled = false;
     endButton.hidden = true;

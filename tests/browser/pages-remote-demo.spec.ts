@@ -462,6 +462,135 @@ test('surfaces a post-connect protocol error and removes the capability holder',
   await expect(page.locator('.remote-placeholder')).toBeVisible();
 });
 
+for (const startupRace of [
+  { method: 'connect', rejects: false, spawnRequests: 0 },
+  { method: 'spawn', rejects: false, spawnRequests: 1 },
+  { method: 'spawn', rejects: true, spawnRequests: 1 },
+] as const) {
+  const outcome = startupRace.rejects ? 'rejects' : 'resolves';
+  test(`does not resurrect a session closed while ${startupRace.method} ${outcome}`, async ({
+    page,
+    browserErrors: _browserErrors,
+  }) => {
+    const spawnOptions: Record<string, unknown>[] = [];
+    await installAdmissionMock(page);
+    await page.routeWebSocket(
+      `${backendOrigin.replace('https:', 'wss:')}/terminal`,
+      (route) => installProtocolMock(route, spawnOptions),
+    );
+
+    await page.goto(enabledFixture.remotePageUrl);
+    await closeTerminalWhenMethodSettles(
+      page,
+      startupRace.method,
+      startupRace.rejects,
+    );
+    await page.getByRole('button', { name: 'Start real demo' }).click();
+
+    await expect(page.locator('[data-remote-status]')).toContainText(
+      'Session ended',
+    );
+    await expect(page.locator('[data-remote-status]')).toHaveAttribute(
+      'data-state',
+      'idle',
+    );
+    await expect(page.locator('lit-shell-terminal')).toHaveCount(0);
+    await expect(page.locator('.remote-placeholder')).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Start real demo' }),
+    ).toBeEnabled();
+    await expect(
+      page.getByRole('button', { name: 'Start real demo' }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole('button', { name: 'End session' }),
+    ).toBeHidden();
+    await expect(page.locator('[data-remote-countdown]')).toBeHidden();
+    expect(spawnOptions).toHaveLength(startupRace.spawnRequests);
+  });
+}
+
+test('times out a stalled admission request without opening a WebSocket', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  await page.clock.install();
+  await installTurnstileMock(page);
+  const admissionStarted = deferred<void>();
+  const releaseAdmission = deferred<void>();
+  const webSockets: string[] = [];
+  page.on('websocket', (socket) => webSockets.push(socket.url()));
+  await page.route(`${backendOrigin}/**`, async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const headers = {
+      'access-control-allow-origin': enabledFixture.origin,
+      'access-control-expose-headers': 'Retry-After',
+      'cache-control': 'no-store',
+    };
+    if (pathname === '/health/ready') {
+      await route.fulfill({
+        body: JSON.stringify({ status: 'ready' }),
+        contentType: 'application/json',
+        headers,
+        status: 200,
+      });
+      return;
+    }
+    if (pathname === '/v1/admissions') {
+      admissionStarted.resolve();
+      await releaseAdmission.promise;
+      await route.abort('aborted').catch(() => undefined);
+      return;
+    }
+    await route.fulfill({ status: 404 });
+  });
+
+  try {
+    await page.goto(enabledFixture.remotePageUrl);
+    await page.getByRole('button', { name: 'Start real demo' }).click();
+    await admissionStarted.promise;
+    await expect(page.locator('[data-remote-status]')).toContainText(
+      'Requesting a place in the shared container',
+    );
+
+    await page.clock.fastForward(9_999);
+    await expect(page.locator('[data-remote-status]')).toHaveAttribute(
+      'data-state',
+      'loading',
+    );
+    await expect(
+      page.getByRole('button', { name: 'Start real demo' }),
+    ).toBeDisabled();
+
+    await page.clock.fastForward(2);
+    await expect(page.locator('[data-remote-status]')).toContainText(
+      'The admission request timed out. Please try again.',
+    );
+    await expect(page.locator('[data-remote-status]')).toHaveAttribute(
+      'role',
+      'alert',
+    );
+    await expect(page.locator('[data-remote-mount]')).toHaveAttribute(
+      'aria-busy',
+      'false',
+    );
+    await expect(
+      page.getByRole('button', { name: 'Start real demo' }),
+    ).toBeEnabled();
+    await expect(
+      page.getByRole('button', { name: 'Start real demo' }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole('button', { name: 'End session' }),
+    ).toBeHidden();
+    await expect(page.locator('lit-shell-terminal')).toHaveCount(0);
+    await expect(page.locator('.remote-placeholder')).toBeVisible();
+    expect(webSockets).toEqual([]);
+  } finally {
+    releaseAdmission.resolve();
+  }
+});
+
 test('reports a busy anonymous slot without attempting a WebSocket', async ({
   page,
   browserErrors,
@@ -708,6 +837,52 @@ interface AdmissionMock {
   readonly body: Record<string, unknown>;
   readonly headers?: Record<string, string>;
   readonly status: number;
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+async function closeTerminalWhenMethodSettles(
+  page: Page,
+  method: 'connect' | 'spawn',
+  rejectAfterClose: boolean,
+): Promise<void> {
+  await page.evaluate(
+    ({ methodName, shouldReject }) => {
+      type AsyncTerminalMethod = (...args: unknown[]) => Promise<unknown>;
+      type TerminalPrototype = HTMLElement & {
+        connect: AsyncTerminalMethod;
+        spawn: AsyncTerminalMethod;
+      };
+      const terminalConstructor = customElements.get('lit-shell-terminal');
+      if (!terminalConstructor) {
+        throw new Error('lit-shell-terminal was not registered');
+      }
+      const prototype = terminalConstructor.prototype as TerminalPrototype;
+      const original = prototype[methodName];
+      prototype[methodName] = async function (...args: unknown[]) {
+        const result = await original.apply(this, args);
+        this.dispatchEvent(
+          new CustomEvent(
+            methodName === 'connect' ? 'disconnect' : 'session-closed',
+          ),
+        );
+        if (shouldReject) throw new Error('synthetic stale startup rejection');
+        return result;
+      };
+    },
+    { methodName: method, shouldReject: rejectAfterClose },
+  );
 }
 
 async function installAdmissionMock(
