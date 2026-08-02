@@ -46,10 +46,18 @@ LTS is recommended for development and deployment.
 For server use, install the optional native PTY peer alongside lit-shell:
 
 ```bash
-npm install lit-shell.js node-pty
+npm install lit-shell.js node-pty@1.2.0-beta.14
 ```
 
 ### Server-Side Requirements (node-pty)
+
+The `node-pty` prerelease above is deliberate and exact. The current `1.1.0`
+stable package ships its macOS spawn helper without executable permissions;
+the upstream fix is available in `1.2.0-beta.14`, while
+[microsoft/node-pty#919](https://github.com/microsoft/node-pty/issues/919)
+tracks a fixed stable release. The optional peer range already accepts a
+future stable `1.2.x` or later compatible `1.x` release, but the documented
+install stays on the reviewed beta until a stable release is verified here.
 
 `node-pty` may require native compilation. Install the platform tools required
 by `node-gyp` if no prebuilt binary is available:

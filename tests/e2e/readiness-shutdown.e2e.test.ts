@@ -8,6 +8,7 @@ import {
   startTestServer,
   testEnvironment,
   type StartedTestServer,
+  waitUntil,
 } from './protocol-harness.js';
 
 describe('TerminalServer readiness and lifecycle (black-box)', () => {
@@ -73,6 +74,55 @@ describe('TerminalServer readiness and lifecycle (black-box)', () => {
         },
       });
     }
+  });
+
+  it('serves concurrent cold-start requests after PTY initialization', async () => {
+    let authorizationCalls = 0;
+    let releaseAuthorization!: () => void;
+    const authorizationGate = new Promise<void>((resolve) => {
+      releaseAuthorization = resolve;
+    });
+    const coldStartServer = await startTestServer({
+      authorize: async () => {
+        authorizationCalls += 1;
+        await authorizationGate;
+        return true;
+      },
+    });
+    server = coldStartServer;
+
+    const connectAndSpawn = () =>
+      coldStartServer.connect((client) => {
+        client.send({
+          type: 'spawn',
+          options: {
+            shell: '/bin/sh',
+            cwd: process.cwd(),
+            env: testEnvironment(),
+          },
+        });
+      });
+    const [first, second] = await Promise.all([
+      connectAndSpawn(),
+      connectAndSpawn(),
+    ]);
+
+    await waitUntil(() => authorizationCalls === 2, {
+      description: 'both cold-start authorization hooks',
+    });
+    releaseAuthorization();
+
+    const [firstSpawned, secondSpawned] = await Promise.all([
+      first.waitForType('spawned'),
+      second.waitForType('spawned'),
+    ]);
+    expect(firstSpawned.sessionId).toEqual(expect.any(String));
+    expect(secondSpawned.sessionId).toEqual(expect.any(String));
+    expect(firstSpawned.sessionId).not.toBe(secondSpawned.sessionId);
+    expect(coldStartServer.terminal.getStats()).toMatchObject({
+      sessionCount: 2,
+      clientCount: 2,
+    });
   });
 
   it('accepts WebSocket upgrades only on its configured endpoint', async () => {

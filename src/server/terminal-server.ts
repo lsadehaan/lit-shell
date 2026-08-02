@@ -620,7 +620,7 @@ export class TerminalServer {
       .catch((error: unknown) => {
         this.ptyInitialization = null;
         throw new Error(
-          'node-pty is required for lit-shell. Install it with: npm install node-pty',
+          'node-pty is required for lit-shell. Install it with: npm install node-pty@1.2.0-beta.14',
           { cause: error },
         );
       });

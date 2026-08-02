@@ -109,7 +109,7 @@
     "esbuild@0.28.1": true,
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
-    "node-pty@1.1.0": true
+    "node-pty@1.2.0-beta.14": true
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -136,7 +136,7 @@
     "globals": "^17.8.0",
     "knip": "^6.31.0",
     "markdownlint-cli2": "^0.23.2",
-    "node-pty": "1.1.0",
+    "node-pty": "1.2.0-beta.14",
     "prettier": "^3.9.6",
     "publint": "^0.3.22",
     "typescript": "^6.0.3",
@@ -144,7 +144,7 @@
     "vitest": "4.1.10"
   },
   "peerDependencies": {
-    "node-pty": "1.1.0"
+    "node-pty": "1.2.0-beta.14 || ^1.2.0"
   },
   "peerDependenciesMeta": {
     "node-pty": {

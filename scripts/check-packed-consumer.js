@@ -139,12 +139,13 @@ try {
     );
   }
   if (
-    packageManifest.peerDependencies?.['node-pty'] !== '1.1.0' ||
+    packageManifest.peerDependencies?.['node-pty'] !==
+      '1.2.0-beta.14 || ^1.2.0' ||
     packageManifest.peerDependenciesMeta?.['node-pty']?.optional !== true ||
     packageManifest.optionalDependencies?.['node-pty'] !== undefined
   ) {
     throw new Error(
-      'The packed manifest must expose node-pty 1.1.0 only as an optional peer',
+      'The packed manifest must expose the reviewed node-pty beta and compatible stable 1.x releases only as an optional peer',
     );
   }
   if (existsSync(join(temporaryRoot, 'node_modules', 'node-pty'))) {
