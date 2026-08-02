@@ -553,7 +553,9 @@ test('times out a stalled admission request without opening a WebSocket', async 
       'Requesting a place in the shared container',
     );
 
-    await page.clock.fastForward(9_999);
+    // Installed clocks keep moving in real time until explicitly paused, so
+    // leave enough margin for assertions on slower browser runners.
+    await page.clock.fastForward(5_000);
     await expect(page.locator('[data-remote-status]')).toHaveAttribute(
       'data-state',
       'loading',
@@ -562,7 +564,7 @@ test('times out a stalled admission request without opening a WebSocket', async 
       page.getByRole('button', { name: 'Start real demo' }),
     ).toBeDisabled();
 
-    await page.clock.fastForward(2);
+    await page.clock.fastForward(5_100);
     await expect(page.locator('[data-remote-status]')).toContainText(
       'The admission request timed out. Please try again.',
     );
