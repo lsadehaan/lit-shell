@@ -11,7 +11,7 @@ import type { Duplex } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 
 import { TerminalServer } from '../../src/server/index.js';
 import { AdmissionController, AdmissionUnavailableError } from './admission.js';
@@ -20,49 +20,82 @@ import {
   REMOTE_DEMO_LIMITS,
   type RemoteDemoConfig,
 } from './config.js';
+import { resetSharedEnvironment } from './shared-environment.js';
+import {
+  createTurnstileVerifier,
+  TurnstileUnavailableError,
+  type TurnstileVerifier,
+  VerificationAttemptLimiter,
+} from './turnstile.js';
 
 const execFileAsync = promisify(execFile);
 const APPLICATION_PROTOCOL = 'lit-shell.v1';
 const ADMISSION_PROTOCOL_PREFIX = 'lit-shell.admission.';
-const SANDBOX_SELF_TEST_MARKER = 'lit-shell-sandbox-self-test-ok';
-const SANDBOX_RECOVERY_TIMEOUT_MS = 5_000;
+const GUEST_SELF_TEST_MARKER = 'lit-shell-guest-self-test-ok';
+const RESET_CLOSE_CODE = 1012;
+const RESET_CLOSE_REASON = 'Shared demo reset';
 
 export interface RemoteDemoService {
   readonly httpServer: HttpServer;
   readonly terminalServer: TerminalServer;
   close(): Promise<void>;
   listen(): Promise<{ origin: string }>;
+  resetNow(): Promise<void>;
 }
 
 interface RemoteDemoServiceOptions {
   readonly config: RemoteDemoConfig;
-  readonly preflight?: () => Promise<void>;
-  readonly sandboxRecoveryTimeoutMs?: number;
+  readonly now?: () => number;
+  readonly onResetFailure?: (error: unknown) => void;
+  readonly prepareEnvironment?: () => Promise<void>;
+  readonly resetEnvironment?: () => Promise<void>;
+  readonly resetIntervalMs?: number;
+  readonly turnstileVerifier?: TurnstileVerifier;
 }
 
 export async function createRemoteDemoService(
   options: RemoteDemoServiceOptions,
 ): Promise<RemoteDemoService> {
   const { config } = options;
-  const verifySandbox =
-    options.preflight ?? (() => preflightSandbox(config.launcherPath));
-  const sandboxRecoveryTimeoutMs =
-    options.sandboxRecoveryTimeoutMs ?? SANDBOX_RECOVERY_TIMEOUT_MS;
-  if (
-    !Number.isSafeInteger(sandboxRecoveryTimeoutMs) ||
-    sandboxRecoveryTimeoutMs <= 0
-  ) {
-    throw new TypeError('sandboxRecoveryTimeoutMs must be a positive integer');
-  }
-  await verifySandbox();
-  let sandboxHealthy = true;
+  const now = options.now ?? Date.now;
+  const resetIntervalMs = positiveInteger(
+    options.resetIntervalMs ?? REMOTE_DEMO_LIMITS.resetIntervalMs,
+    'resetIntervalMs',
+  );
+  const resetEnvironment =
+    options.resetEnvironment ?? (() => resetSharedEnvironment(config));
+  const prepareEnvironment =
+    options.prepareEnvironment ??
+    (() => preflightSharedDemo(config, resetEnvironment));
+  const verifier =
+    options.turnstileVerifier ??
+    createTurnstileVerifier({
+      expectedAction: config.turnstileExpectedAction,
+      expectedHostname: config.turnstileExpectedHostname,
+      secretKey: config.turnstileSecretKey,
+    });
+  await prepareEnvironment();
 
   const admissions = new AdmissionController({
     activeLeaseMs: REMOTE_DEMO_LIMITS.activeLeaseMs,
+    capacity: REMOTE_DEMO_LIMITS.admissionCapacity,
     pendingLeaseMs: REMOTE_DEMO_LIMITS.pendingLeaseMs,
   });
+  const attempts = new VerificationAttemptLimiter({
+    burst: REMOTE_DEMO_LIMITS.maxVerificationBurst,
+    maxConcurrent: REMOTE_DEMO_LIMITS.maxConcurrentVerifications,
+    now,
+    refillIntervalMs: REMOTE_DEMO_LIMITS.verificationRefillIntervalMs,
+  });
   const approvedRequests = new WeakSet<IncomingMessage>();
-  const terminalServer = createLockedTerminalServer(config, approvedRequests);
+  let terminalServer = createSharedTerminalServer(config, approvedRequests);
+  let accepting = true;
+  let closed = false;
+  let epoch = 1;
+  let resetAt = now() + resetIntervalMs;
+  let resetPromise: Promise<void> | undefined;
+  let resetTimer: ReturnType<typeof setTimeout> | undefined;
+
   const webSocketServer = new WebSocketServer({
     handleProtocols(protocols) {
       return protocols.has(APPLICATION_PROTOCOL) ? APPLICATION_PROTOCOL : false;
@@ -71,6 +104,7 @@ export async function createRemoteDemoService(
     noServer: true,
     perMessageDeflate: false,
   });
+  const state = () => ({ accepting, epoch, resetAt });
   const httpServer = createServer(
     {
       headersTimeout: 5_000,
@@ -79,35 +113,78 @@ export async function createRemoteDemoService(
       requestTimeout: 5_000,
     },
     (request, response) => {
-      try {
-        handleHttpRequest(
-          request,
-          response,
-          config,
-          admissions,
-          () => sandboxHealthy,
-        );
-      } catch {
+      void handleHttpRequest(
+        request,
+        response,
+        config,
+        admissions,
+        attempts,
+        verifier,
+        state,
+        now,
+      ).catch((error: unknown) => {
+        if (error instanceof HttpRequestError) {
+          if (error.statusCode === 413) {
+            response.setHeader('connection', 'close');
+          }
+          if (error.retryAfterSeconds !== undefined) {
+            response.setHeader('retry-after', String(error.retryAfterSeconds));
+          }
+          writeJson(response, error.statusCode, { error: error.message });
+          return;
+        }
         writeJson(response, 500, { error: 'Internal server error' });
-      }
+      });
     },
   );
   httpServer.maxHeadersCount = 32;
   httpServer.maxRequestsPerSocket = 10;
 
-  const releaseAfterSandboxRecovery = (leaseId: number) => {
-    sandboxHealthy = false;
-    void waitForSandboxRecovery(verifySandbox, sandboxRecoveryTimeoutMs)
-      .then(() => {
-        admissions.release(leaseId);
-        sandboxHealthy = true;
-      })
-      .catch((error: unknown) => {
-        console.error(
-          '[remote-demo] sandbox cleanup verification failed:',
-          error instanceof Error ? error.message : 'unknown error',
-        );
-      });
+  const scheduleReset = () => {
+    if (closed || resetTimer) return;
+    resetTimer = setTimeout(
+      () => {
+        resetTimer = undefined;
+        void resetNow().catch((error: unknown) => {
+          console.error(
+            '[remote-demo] shared environment reset failed:',
+            error instanceof Error ? error.message : 'unknown error',
+          );
+          options.onResetFailure?.(error);
+        });
+      },
+      Math.max(1, resetAt - now()),
+    );
+    resetTimer.unref();
+  };
+
+  const resetNow = (): Promise<void> => {
+    if (resetPromise) return resetPromise;
+    resetPromise = (async () => {
+      accepting = false;
+      if (resetTimer) clearTimeout(resetTimer);
+      resetTimer = undefined;
+      for (const client of webSocketServer.clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.close(RESET_CLOSE_CODE, RESET_CLOSE_REASON);
+        } else {
+          client.terminate();
+        }
+      }
+      terminalServer.close();
+      admissions.reset();
+      await resetEnvironment();
+      if (closed) return;
+      for (const client of webSocketServer.clients) client.terminate();
+      terminalServer = createSharedTerminalServer(config, approvedRequests);
+      epoch += 1;
+      resetAt = now() + resetIntervalMs;
+      accepting = true;
+      scheduleReset();
+    })().finally(() => {
+      resetPromise = undefined;
+    });
+    return resetPromise;
   };
 
   httpServer.on('upgrade', (request, socket, head) => {
@@ -118,9 +195,9 @@ export async function createRemoteDemoService(
       config,
       admissions,
       approvedRequests,
-      terminalServer,
+      () => terminalServer,
       webSocketServer,
-      releaseAfterSandboxRecovery,
+      () => accepting,
     );
   });
   httpServer.on('clientError', (_error, socket) => {
@@ -129,14 +206,22 @@ export async function createRemoteDemoService(
 
   return {
     httpServer,
-    terminalServer,
+    get terminalServer() {
+      return terminalServer;
+    },
     async close() {
+      if (closed) return;
+      closed = true;
+      accepting = false;
+      if (resetTimer) clearTimeout(resetTimer);
+      resetTimer = undefined;
       terminalServer.close();
       for (const client of webSocketServer.clients) client.terminate();
       webSocketServer.close();
       httpServer.closeAllConnections();
-      if (!httpServer.listening) return;
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      if (httpServer.listening) {
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      }
     },
     async listen() {
       await new Promise<void>((resolve, reject) => {
@@ -152,6 +237,7 @@ export async function createRemoteDemoService(
         httpServer.once('listening', onListening);
         httpServer.listen(config.port, config.host);
       });
+      scheduleReset();
       const address = httpServer.address();
       if (!address || typeof address === 'string') {
         throw new Error('Remote demo did not expose a TCP address');
@@ -161,10 +247,11 @@ export async function createRemoteDemoService(
         : config.host;
       return { origin: `http://${host}:${String(address.port)}` };
     },
+    resetNow,
   };
 }
 
-function createLockedTerminalServer(
+function createSharedTerminalServer(
   config: RemoteDemoConfig,
   approvedRequests: WeakSet<IncomingMessage>,
 ): TerminalServer {
@@ -172,26 +259,29 @@ function createLockedTerminalServer(
     allowDockerExec: false,
     allowedClientOptions: ['allowJoin', 'cols', 'rows'],
     allowedOrigins: [config.allowedOrigin],
-    allowedPaths: ['/'],
+    allowedPaths: [config.workspacePath],
     allowedShells: [config.launcherPath],
     allowSessionSharing: false,
     authorize: (request) => approvedRequests.delete(request),
     cleanupInterval: 1_000,
-    defaultCwd: '/',
+    defaultCwd: config.workspacePath,
     defaultShell: config.launcherPath,
     historyEnabled: false,
     historySize: 0,
     idleTimeout: REMOTE_DEMO_LIMITS.idleTimeoutMs,
     localEnvironment: {
-      HOME: '/home/demo',
+      HOME: config.workspacePath,
       LANG: 'C.UTF-8',
-      LOGNAME: 'demo',
+      LOGNAME: 'guest',
       PATH: '/bin:/usr/bin',
-      PS1: 'guest@lit-shell:\\w$ ',
+      PS1: 'guest@shared-lit-shell:\\w$ ',
       SHELL: '/bin/sh',
       TERM: 'xterm-256color',
-      USER: 'demo',
+      TMPDIR: `${config.workspacePath}/tmp`,
+      USER: 'guest',
     },
+    localGid: config.guestGid,
+    localUid: config.guestUid,
     maxBufferedOutputBytes: REMOTE_DEMO_LIMITS.maxBufferedOutputBytes,
     maxClientsPerSession: 1,
     maxConnectionBytes: REMOTE_DEMO_LIMITS.maxConnectionBytes,
@@ -204,40 +294,56 @@ function createLockedTerminalServer(
     maxSessionOutputBytes: REMOTE_DEMO_LIMITS.maxOutputBytes,
     maxSessionsCreatedPerConnection: 1,
     maxSessionsPerClient: 1,
-    maxSessionsTotal: 1,
+    maxSessionsTotal: REMOTE_DEMO_LIMITS.admissionCapacity,
     orphanTimeout: 0,
     path: '/terminal',
     verbose: false,
   });
 }
 
-function handleHttpRequest(
+interface RemoteDemoState {
+  readonly accepting: boolean;
+  readonly epoch: number;
+  readonly resetAt: number;
+}
+
+async function handleHttpRequest(
   request: IncomingMessage,
   response: ServerResponse,
   config: RemoteDemoConfig,
   admissions: AdmissionController,
-  sandboxReady: () => boolean,
-): void {
+  attempts: VerificationAttemptLimiter,
+  verifier: TurnstileVerifier,
+  state: () => RemoteDemoState,
+  now: () => number,
+): Promise<void> {
   applyResponseHeaders(response);
   applyCorsResponseHeaders(request, response, config.allowedOrigin);
   const pathname = requestPathname(request);
+  const current = state();
   if (request.method === 'GET' && pathname === '/health/live') {
     writeJson(response, 200, {
+      epoch: current.epoch,
+      resetAt: new Date(current.resetAt).toISOString(),
       revision: config.buildRevision,
       status: 'live',
     });
     return;
   }
   if (request.method === 'GET' && pathname === '/health/ready') {
-    if (!sandboxReady()) {
+    if (!current.accepting) {
       writeJson(response, 503, {
+        epoch: current.epoch,
+        resetAt: new Date(current.resetAt).toISOString(),
         revision: config.buildRevision,
-        status: 'unavailable',
+        status: 'resetting',
       });
       return;
     }
     writeJson(response, 200, {
-      admission: admissions.status(),
+      admission: admissions.snapshot(),
+      epoch: current.epoch,
+      resetAt: new Date(current.resetAt).toISOString(),
       revision: config.buildRevision,
       status: 'ready',
     });
@@ -247,17 +353,51 @@ function handleHttpRequest(
     writeJson(response, 404, { error: 'Not found' });
     return;
   }
-  if (!sandboxReady()) {
-    writeJson(response, 503, { error: 'Sandbox is unavailable' });
-    return;
+  if (!current.accepting) {
+    throw new HttpRequestError(503, 'Shared environment is resetting', 2);
   }
   if (request.headers.origin !== config.allowedOrigin) {
-    writeJson(response, 403, { error: 'Origin is not allowed' });
-    return;
+    throw new HttpRequestError(403, 'Origin is not allowed');
   }
-  if (requestHasBody(request)) {
-    writeJson(response, 413, { error: 'Admission requests must have no body' });
-    return;
+
+  const token = await readTurnstileToken(request);
+  const releaseAttempt = attempts.begin();
+  if (!releaseAttempt) {
+    throw new HttpRequestError(
+      429,
+      'Too many verification attempts',
+      attempts.retryAfterSeconds(),
+    );
+  }
+
+  let verified: boolean;
+  try {
+    verified = await verifier.verify(token);
+  } catch (error) {
+    if (error instanceof TurnstileUnavailableError) {
+      throw new HttpRequestError(
+        503,
+        'Human verification is temporarily unavailable',
+        5,
+      );
+    }
+    throw error;
+  } finally {
+    releaseAttempt();
+  }
+  if (!verified) {
+    throw new HttpRequestError(403, 'Human verification failed');
+  }
+  const afterVerification = state();
+  if (
+    !afterVerification.accepting ||
+    afterVerification.epoch !== current.epoch
+  ) {
+    throw new HttpRequestError(
+      503,
+      'Shared environment reset during verification',
+      2,
+    );
   }
 
   try {
@@ -265,14 +405,20 @@ function handleHttpRequest(
     writeJson(response, 201, {
       expiresAt: new Date(grant.expiresAt).toISOString(),
       protocol: APPLICATION_PROTOCOL,
-      sessionLifetimeMs: REMOTE_DEMO_LIMITS.sessionLifetimeMs,
+      resetAt: new Date(afterVerification.resetAt).toISOString(),
+      sessionLifetimeMs: Math.max(
+        1,
+        Math.min(
+          REMOTE_DEMO_LIMITS.sessionLifetimeMs,
+          afterVerification.resetAt - now(),
+        ),
+      ),
       token: grant.token,
       webSocketPath: '/terminal',
     });
   } catch (error) {
     if (!(error instanceof AdmissionUnavailableError)) throw error;
-    response.setHeader('retry-after', String(error.retryAfterSeconds));
-    writeJson(response, 429, { error: error.message });
+    throw new HttpRequestError(429, error.message, error.retryAfterSeconds);
   }
 }
 
@@ -283,11 +429,12 @@ function handleUpgrade(
   config: RemoteDemoConfig,
   admissions: AdmissionController,
   approvedRequests: WeakSet<IncomingMessage>,
-  terminalServer: TerminalServer,
+  terminalServer: () => TerminalServer,
   webSocketServer: WebSocketServer,
-  releaseAfterSandboxRecovery: (leaseId: number) => void,
+  accepting: () => boolean,
 ): void {
   if (
+    !accepting() ||
     request.method !== 'GET' ||
     requestPathname(request) !== '/terminal' ||
     request.headers.origin !== config.allowedOrigin
@@ -329,11 +476,11 @@ function handleUpgrade(
       webSocket.once('close', () => {
         clearTimeout(deadlineTimer);
         if (terminationTimer) clearTimeout(terminationTimer);
-        releaseAfterSandboxRecovery(lease.id);
+        admissions.release(lease.id);
       });
-      void terminalServer.handleConnection(webSocket, request).catch(() => {
-        webSocket.terminate();
-      });
+      void terminalServer()
+        .handleConnection(webSocket, request)
+        .catch(() => webSocket.terminate());
     });
   } catch {
     socket.off('close', releaseAbortedUpgrade);
@@ -358,12 +505,101 @@ function admissionProtocolToken(
   return token && /^[A-Za-z0-9_-]{43,}$/u.test(token) ? token : undefined;
 }
 
-function requestHasBody(request: IncomingMessage): boolean {
-  const contentLength = request.headers['content-length'];
-  return (
-    request.headers['transfer-encoding'] !== undefined ||
-    (contentLength !== undefined && contentLength !== '0')
+async function readTurnstileToken(request: IncomingMessage): Promise<string> {
+  const contentType = request.headers['content-type']
+    ?.split(';', 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== 'application/x-www-form-urlencoded') {
+    throw new HttpRequestError(
+      415,
+      'Admission requires a form-encoded verification token',
+    );
+  }
+  const declaredLength = Number(request.headers['content-length']);
+  if (
+    Number.isFinite(declaredLength) &&
+    declaredLength > REMOTE_DEMO_LIMITS.maxAdmissionBodyBytes
+  ) {
+    request.resume();
+    throw new HttpRequestError(413, 'Admission request is too large');
+  }
+
+  const body = await readBoundedRequestBody(
+    request,
+    REMOTE_DEMO_LIMITS.maxAdmissionBodyBytes,
   );
+  const form = new URLSearchParams(body.toString('utf8'));
+  const keys = Array.from(form.keys());
+  const values = form.getAll('turnstileToken');
+  if (
+    keys.length !== 1 ||
+    keys[0] !== 'turnstileToken' ||
+    values.length !== 1
+  ) {
+    throw new HttpRequestError(
+      400,
+      'Admission requires exactly one verification token',
+    );
+  }
+  const token = values[0] ?? '';
+  if (
+    token.length < 1 ||
+    token.length > 2_048 ||
+    hasAsciiControlOrSpace(token)
+  ) {
+    throw new HttpRequestError(400, 'Verification token is malformed');
+  }
+  return token;
+}
+
+function readBoundedRequestBody(
+  request: IncomingMessage,
+  maximumBytes: number,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+
+    request.on('data', (chunk: unknown) => {
+      if (settled) return;
+      if (!(chunk instanceof Uint8Array)) {
+        settled = true;
+        request.resume();
+        reject(new HttpRequestError(400, 'Admission request body is invalid'));
+        return;
+      }
+      const buffer = Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > maximumBytes) {
+        settled = true;
+        request.resume();
+        reject(new HttpRequestError(413, 'Admission request is too large'));
+        return;
+      }
+      chunks.push(buffer);
+    });
+    request.once('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    const rejectIncomplete = () => {
+      if (settled) return;
+      settled = true;
+      reject(new HttpRequestError(400, 'Admission request body is incomplete'));
+    };
+    request.once('aborted', rejectIncomplete);
+    request.once('error', rejectIncomplete);
+  });
+}
+
+function hasAsciiControlOrSpace(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x20 || codePoint === 0x7f;
+  });
 }
 
 function requestPathname(request: IncomingMessage): string | undefined {
@@ -423,55 +659,93 @@ function rejectUpgrade(
   );
 }
 
-async function preflightSandbox(launcherPath: string): Promise<void> {
-  await access(launcherPath, fsConstants.X_OK);
+async function preflightSharedDemo(
+  config: RemoteDemoConfig,
+  resetEnvironment: () => Promise<void>,
+): Promise<void> {
+  await access(config.launcherPath, fsConstants.X_OK);
   await import('node-pty');
-  const result = await execFileAsync(launcherPath, ['--self-test'], {
-    encoding: 'utf8',
-    env: {},
-    maxBuffer: 16 * 1024,
-    timeout: 5_000,
-  });
-  if (result.stdout.trim() !== SANDBOX_SELF_TEST_MARKER) {
-    throw new Error('The sandbox launcher self-test did not pass');
+  let stdout: string;
+  try {
+    const result = await execFileAsync(config.launcherPath, ['--self-test'], {
+      encoding: 'utf8',
+      env: {},
+      gid: config.guestGid,
+      maxBuffer: 16 * 1024,
+      timeout: 5_000,
+      uid: config.guestUid,
+    });
+    stdout = result.stdout;
+  } catch (error) {
+    throw new Error('The fixed guest identity transition is unavailable', {
+      cause: error,
+    });
+  }
+  if (stdout.trim() !== GUEST_SELF_TEST_MARKER) {
+    throw new Error('The fixed guest identity self-test did not pass');
+  }
+  await resetEnvironment();
+}
+
+function assertRootGatewayIdentity(): void {
+  if (
+    process.platform !== 'linux' ||
+    !process.getuid ||
+    !process.setgroups ||
+    !process.getgroups ||
+    process.getuid() !== 0
+  ) {
+    throw new Error('The disposable demo gateway must start as Linux root');
+  }
+  process.setgroups([]);
+  // Node includes the effective GID in getgroups() even when the kernel's
+  // supplementary group list is empty. The launcher self-test below proves
+  // that no root group crosses the subsequent UID/GID transition.
+  if (process.getgroups().some((group) => group !== 0)) {
+    throw new Error('The disposable demo gateway retained an unexpected group');
   }
 }
 
-async function waitForSandboxRecovery(
-  verifySandbox: () => Promise<void>,
-  timeoutMs: number,
-): Promise<void> {
-  const deadline = performance.now() + timeoutMs;
-  let lastError: unknown;
-  do {
-    try {
-      await verifySandbox();
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-    const remainingMs = deadline - performance.now();
-    if (remainingMs <= 0) break;
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.min(100, remainingMs)),
-    );
-  } while (performance.now() < deadline);
-  throw new Error('The sandbox did not recover after session cleanup', {
-    cause: lastError,
-  });
-}
-
 async function main(): Promise<void> {
+  assertRootGatewayIdentity();
   const service = await createRemoteDemoService({
     config: loadRemoteDemoConfig(),
+    onResetFailure: () => process.exit(1),
   });
   const shutdown = () => {
     void service.close().finally(() => process.exit(0));
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
+  process.on('SIGUSR2', () => {
+    void service.resetNow().catch((error: unknown) => {
+      console.error(
+        '[remote-demo] requested shared environment reset failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      process.exit(1);
+    });
+  });
   await service.listen();
   console.log('[remote-demo] ready');
+}
+
+class HttpRequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string,
+    readonly retryAfterSeconds?: number,
+  ) {
+    super(message);
+    this.name = 'HttpRequestError';
+  }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return value;
 }
 
 const entrypoint = process.argv[1];

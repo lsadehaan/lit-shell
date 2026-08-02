@@ -51,6 +51,29 @@
   margin-bottom: 0.75rem;
 }
 
+.turnstile-panel {
+  background: #101a24;
+  border: 1px solid #3a5063;
+  border-radius: 0.6rem;
+  margin: 0 0 0.9rem;
+  max-width: 32rem;
+  padding: 0.8rem;
+}
+
+.turnstile-panel[hidden] {
+  display: none;
+}
+
+.turnstile-panel > div {
+  min-height: 65px;
+}
+
+.turnstile-panel p {
+  color: #9fb1c1;
+  font-size: 0.9rem;
+  margin: 0.65rem 0 0;
+}
+
 .remote-countdown {
   color: #9fb1c1;
   flex: 0 0 auto;

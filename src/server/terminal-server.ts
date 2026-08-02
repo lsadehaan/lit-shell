@@ -34,6 +34,7 @@ import {
   MAX_TERMINAL_COLUMNS,
   MAX_TERMINAL_ROWS,
   MAX_TIMER_DELAY_MS,
+  resolveOptionalSafeIntegerOption,
   resolveSafeIntegerOption,
 } from './numeric-limits.js';
 import { secureTokenMatches } from './secure-token.js';
@@ -48,6 +49,7 @@ type RequestId = string;
 const DEFAULT_MAX_PRE_AUTH_MESSAGES = 32;
 const DEFAULT_MAX_PRE_AUTH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024;
+const MAX_NODE_PTY_ID = 2_147_483_647;
 const DOCKER_LIST_TIMEOUT_MS = 5_000;
 const DOCKER_LIST_MAX_BUFFER_BYTES = 1024 * 1024;
 const DOCKER_LIST_CACHE_TTL_MS = 1_000;
@@ -104,6 +106,8 @@ const TERMINAL_SERVER_OPTION_KEYS = new Set([
   'authorize',
   'allowedClientOptions',
   'localEnvironment',
+  'localUid',
+  'localGid',
   'maxPreAuthMessages',
   'maxPreAuthBytes',
   'maxMessageBytes',
@@ -158,9 +162,20 @@ interface PtyModule {
       rows: number;
       cwd?: string;
       env: Record<string, string | undefined>;
+      uid?: number;
+      gid?: number;
     },
   ): TerminalProcess;
 }
+
+type ResolvedLocalIdentity =
+  | { localUid: undefined; localGid: undefined }
+  | { localUid: number; localGid: number };
+
+type ResolvedTerminalServerOptions = Required<
+  Omit<TerminalServerOptions, 'localUid' | 'localGid'>
+> &
+  ResolvedLocalIdentity;
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -301,6 +316,34 @@ function validateTerminalServerOptionTypes(
   assertOptionalBoolean(options.historyEnabled, 'historyEnabled');
   assertOptionalBoolean(options.verbose, 'verbose');
   assertOptionalAuthorize(options.authorize);
+}
+
+function resolveLocalIdentity(
+  options: TerminalServerOptions,
+): ResolvedLocalIdentity {
+  const localUid = resolveOptionalSafeIntegerOption(
+    options.localUid,
+    'localUid',
+    0,
+    MAX_NODE_PTY_ID,
+  );
+  const localGid = resolveOptionalSafeIntegerOption(
+    options.localGid,
+    'localGid',
+    0,
+    MAX_NODE_PTY_ID,
+  );
+
+  if ((localUid === undefined) !== (localGid === undefined)) {
+    throw new TypeError('localUid and localGid must be provided together');
+  }
+  if (localUid === undefined || localGid === undefined) {
+    return { localUid: undefined, localGid: undefined };
+  }
+  if (process.platform === 'win32') {
+    throw new TypeError('localUid and localGid are not supported on Windows');
+  }
+  return { localUid, localGid };
 }
 
 function assertTerminalOptionCompatibility(value: JsonObject): void {
@@ -524,6 +567,10 @@ export interface TerminalServerOptions extends ServerConfig {
   allowedClientOptions?: Array<keyof TerminalOptions>;
   /** Exact environment inherited by local PTYs (default: a snapshot of process.env) */
   localEnvironment?: Record<string, string>;
+  /** Fixed POSIX user ID for every local PTY (requires localGid) */
+  localUid?: number;
+  /** Fixed POSIX group ID for every local PTY (requires localUid) */
+  localGid?: number;
   /** Maximum frames buffered while `authorize` is pending (default: 32, minimum: 0) */
   maxPreAuthMessages?: number;
   /** Maximum frame bytes buffered while `authorize` is pending (default: 65536, minimum: 0) */
@@ -573,7 +620,7 @@ export interface TerminalServerOptions extends ServerConfig {
  * `true` only when terminal sharing is an intentional, authorized feature.
  */
 export class TerminalServer {
-  private config: Required<TerminalServerOptions>;
+  private config: ResolvedTerminalServerOptions;
   private sessionManager: SessionManager;
   private wss: WebSocketServer | null = null;
   private pty: PtyModule | null = null;
@@ -674,6 +721,7 @@ export class TerminalServer {
       MAX_TIMER_DELAY_MS,
     );
     const spawnPolicy = resolveSpawnPolicy(options);
+    const localIdentity = resolveLocalIdentity(options);
 
     this.config = {
       allowedShells: [...(options.allowedShells ?? [getDefaultShell()])],
@@ -700,6 +748,7 @@ export class TerminalServer {
       ), // 30 minutes; 0 disables idle cleanup
       allowLocalExec: options.allowLocalExec ?? true,
       ...spawnPolicy,
+      ...localIdentity,
       path: options.path ?? '/terminal',
       verbose: options.verbose ?? false,
       // Docker options
@@ -871,6 +920,10 @@ export class TerminalServer {
     ws: WebSocket,
     request: IncomingMessage,
   ): Promise<void> {
+    if (this.closed) {
+      closeOpenWebSocket(ws, 1001, 'Terminal server shutting down');
+      return;
+    }
     const clientId = this.getClientId(ws);
     this.connections.add(ws);
     this.log(`Assigned client ID: ${clientId}`);
@@ -899,7 +952,7 @@ export class TerminalServer {
     let messageQueue = Promise.resolve();
 
     ws.on('message', (data) => {
-      if (preAuthRejected) return;
+      if (preAuthRejected || this.closed) return;
 
       const messageBytes = acceptedMessageBytes(
         ws,
@@ -949,6 +1002,7 @@ export class TerminalServer {
           } catch {
             return;
           }
+          if (!this.isConnectionOpen(ws)) return;
           this.handleIncomingMessage(ws, clientId, rawDataToString(data));
         })
         .catch((error: unknown) => {
@@ -976,8 +1030,11 @@ export class TerminalServer {
       return;
     }
 
-    if (!this.closed && ws.readyState === WebSocket.OPEN)
-      this.sendServerInfo(ws);
+    this.sendServerInfoIfOpen(ws);
+  }
+
+  private isConnectionOpen(ws: WebSocket): boolean {
+    return !this.closed && ws.readyState === WebSocket.OPEN;
   }
 
   private handleClientDisconnect(ws: WebSocket, clientId: string): void {
@@ -1032,6 +1089,7 @@ export class TerminalServer {
     clientId: string,
     raw: string,
   ): void {
+    if (!this.isConnectionOpen(ws)) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw) as unknown;
@@ -1076,23 +1134,8 @@ export class TerminalServer {
         }
         case 'resize': {
           const sessionId = this.requireSessionId(parsed);
-          if (
-            !isSafeIntegerInRange(parsed.cols, 1, MAX_TERMINAL_COLUMNS) ||
-            !isSafeIntegerInRange(parsed.rows, 1, MAX_TERMINAL_ROWS)
-          ) {
-            throw new Error(
-              `cols and rows must be safe integers between 1 and ` +
-                `${MAX_TERMINAL_COLUMNS}/${MAX_TERMINAL_ROWS}, respectively`,
-            );
-          }
-          this.resizeSession(
-            ws,
-            sessionId,
-            clientId,
-            parsed.cols,
-            parsed.rows,
-            requestId,
-          );
+          const { cols, rows } = this.requireResizeDimensions(parsed);
+          this.resizeSession(ws, sessionId, clientId, cols, rows, requestId);
           return;
         }
         case 'close': {
@@ -1137,6 +1180,22 @@ export class TerminalServer {
       throw new Error('sessionId must be a non-empty string');
     }
     return message.sessionId;
+  }
+
+  private requireResizeDimensions(message: JsonObject): {
+    cols: number;
+    rows: number;
+  } {
+    if (
+      !isSafeIntegerInRange(message.cols, 1, MAX_TERMINAL_COLUMNS) ||
+      !isSafeIntegerInRange(message.rows, 1, MAX_TERMINAL_ROWS)
+    ) {
+      throw new Error(
+        `cols and rows must be safe integers between 1 and ` +
+          `${MAX_TERMINAL_COLUMNS}/${MAX_TERMINAL_ROWS}, respectively`,
+      );
+    }
+    return { cols: message.cols, rows: message.rows };
   }
 
   private validateTerminalOptions(value: unknown): TerminalOptions {
@@ -1837,6 +1896,9 @@ export class TerminalServer {
         rows,
         cwd,
         env: { ...this.config.localEnvironment, ...env },
+        ...(this.config.localUid === undefined
+          ? {}
+          : { uid: this.config.localUid, gid: this.config.localGid }),
       });
 
       // Create session via SessionManager
@@ -2338,6 +2400,12 @@ export class TerminalServer {
     };
 
     this.sendResponse(ws, { type: 'serverInfo', info });
+  }
+
+  private sendServerInfoIfOpen(ws: WebSocket): void {
+    // PTY initialization and authorization can yield while shutdown begins.
+    if (!this.isConnectionOpen(ws)) return;
+    this.sendServerInfo(ws);
   }
 
   /**

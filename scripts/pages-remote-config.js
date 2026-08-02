@@ -1,15 +1,23 @@
-export function pagesRemoteConfig(candidate) {
-  if (!candidate) {
+export function pagesRemoteConfig(originCandidate, siteKeyCandidate) {
+  if (!originCandidate && !siteKeyCandidate) {
     return {
       connectSource: "'none'",
       enabled: false,
+      frameSource: "'none'",
       origin: '',
+      scriptSource: "'self'",
+      siteKey: '',
     };
+  }
+  if (!originCandidate || !siteKeyCandidate) {
+    throw new TypeError(
+      'LIT_SHELL_REMOTE_DEMO_ORIGIN and LIT_SHELL_TURNSTILE_SITE_KEY must be configured together',
+    );
   }
 
   let url;
   try {
-    url = new URL(candidate);
+    url = new URL(originCandidate);
   } catch (error) {
     throw new TypeError('LIT_SHELL_REMOTE_DEMO_ORIGIN must be a valid URL', {
       cause: error,
@@ -22,10 +30,15 @@ export function pagesRemoteConfig(candidate) {
     url.pathname !== '/' ||
     url.search ||
     url.hash ||
-    url.origin !== candidate
+    url.origin !== originCandidate
   ) {
     throw new TypeError(
       'LIT_SHELL_REMOTE_DEMO_ORIGIN must be one exact HTTPS origin without credentials, path, query, or fragment',
+    );
+  }
+  if (!/^[A-Za-z0-9_-]{20,64}$/u.test(siteKeyCandidate)) {
+    throw new TypeError(
+      'LIT_SHELL_TURNSTILE_SITE_KEY must be a valid public Turnstile sitekey',
     );
   }
 
@@ -33,7 +46,10 @@ export function pagesRemoteConfig(candidate) {
   return {
     connectSource: `${url.origin} ${webSocketOrigin}`,
     enabled: true,
+    frameSource: 'https://challenges.cloudflare.com',
     origin: url.origin,
+    scriptSource: "'self' https://challenges.cloudflare.com",
+    siteKey: siteKeyCandidate,
   };
 }
 

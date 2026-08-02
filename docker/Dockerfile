@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1.10@sha256:865e5dd094beca432e8c0a1d5e1c465db5f998dca4e439981029b3b81fb39ed5
+# syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
 ARG NODE_IMAGE=node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7
-ARG DOCKER_CLI_IMAGE=docker:29.6.1-cli@sha256:862099ada15c669000bef53aa4cb9d821262829f45b0dda2159ccb276443043b
+ARG DOCKER_CLI_IMAGE=docker:29.7.0-cli@sha256:206ae9cc405101ab0cf97d4b515d21bf6aae961f98f7f9d8de6c111718fef335
 
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 
@@ -43,6 +43,12 @@ ENV HOST=0.0.0.0 \
     PORT=3000
 
 WORKDIR /app
+
+RUN rm -rf /usr/local/lib/node_modules/corepack \
+      /usr/local/lib/node_modules/npm \
+      /opt/yarn-v1.22.22 \
+    && rm -f /usr/local/bin/corepack /usr/local/bin/npm \
+      /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build --chown=node:node /app/dist ./dist

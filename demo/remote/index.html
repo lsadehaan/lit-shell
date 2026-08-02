@@ -4,12 +4,12 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; base-uri 'none'; connect-src __LIT_SHELL_REMOTE_CONNECT_SRC__; font-src 'self'; form-action 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+      content="default-src 'none'; base-uri 'none'; connect-src __LIT_SHELL_REMOTE_CONNECT_SRC__; font-src 'self'; form-action 'none'; frame-src __LIT_SHELL_REMOTE_FRAME_SRC__; img-src 'self' data:; object-src 'none'; script-src __LIT_SHELL_REMOTE_SCRIPT_SRC__; style-src 'self' 'unsafe-inline'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="An opt-in, short-lived, isolated remote PTY demonstration of lit-shell.js."
+      content="An opt-in, shared, disposable remote PTY demonstration of lit-shell.js."
     />
     <meta name="color-scheme" content="dark light" />
     <meta name="lit-shell-build" content="__LIT_SHELL_BUILD__" />
@@ -17,7 +17,11 @@
       name="lit-shell-remote-origin"
       content="__LIT_SHELL_REMOTE_ORIGIN__"
     />
-    <title>lit-shell.js — isolated remote shell demo</title>
+    <meta
+      name="lit-shell-turnstile-site-key"
+      content="__LIT_SHELL_TURNSTILE_SITE_KEY__"
+    />
+    <title>lit-shell.js — shared remote shell demo</title>
     <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="../style.css" />
     <link rel="stylesheet" href="./style.css" />
@@ -40,12 +44,12 @@
 
     <main>
       <section class="hero" aria-labelledby="page-title">
-        <p class="eyebrow">Real PTY · explicit opt-in</p>
-        <h1 id="page-title">Try a real, deliberately tiny shell.</h1>
+        <p class="eyebrow">Real PTY · shared and disposable</p>
+        <h1 id="page-title">Make a mess in a tiny shared shell.</h1>
         <p class="lede">
-          This page connects the real lit-shell UI to one isolated, read-only
-          shell for at most 60 seconds. Starting it is anonymous and does not
-          require an account.
+          This page connects the real lit-shell UI to a writable shell in one
+          tiny Render container. Everyone shares its files and processes until
+          the environment resets five minutes later.
         </p>
       </section>
 
@@ -55,13 +59,12 @@
       >
         <div class="safety-icon" aria-hidden="true">⌁</div>
         <div>
-          <h2 id="boundary-title">
-            No writes, network, secrets, or persistence.
-          </h2>
+          <h2 id="boundary-title">Public, writable, and deliberately messy.</h2>
           <p>
-            A separate user, read-only chroot, syscall filter, and strict
-            process, CPU, input, output, idle, and wall-clock limits protect the
-            demo. Only one visitor is admitted at a time.
+            Other visitors can inspect, change, or delete your files and stop
+            your processes. Never enter secrets or personal data. A root-owned
+            gateway enforces the CAPTCHA, four-terminal cap, resource limits,
+            and global five-minute reset.
           </p>
         </div>
       </section>
@@ -102,6 +105,23 @@
         </div>
 
         <div
+          class="turnstile-panel"
+          data-turnstile-panel
+          aria-live="polite"
+          hidden
+        >
+          <div
+            data-turnstile-mount
+            role="group"
+            aria-label="Human verification"
+          ></div>
+          <p>
+            Cloudflare Turnstile checks for automated access. It loads only
+            after you choose to start the demo.
+          </p>
+        </div>
+
+        <div
           class="terminal-frame remote-terminal"
           data-remote-mount
           data-demo-state="idle"
@@ -110,7 +130,7 @@
           <div class="remote-placeholder">
             <p>The shell starts only after you press the button.</p>
             <p>
-              No analytics, login request, or background wake-up runs first.
+              No backend or CAPTCHA request runs before that explicit action.
             </p>
           </div>
           <noscript
@@ -119,9 +139,10 @@
         </div>
 
         <p class="terminal-help">
-          Try <kbd>id</kbd>, <kbd>env</kbd>, <kbd>ls /</kbd>,
-          <kbd>cat /README.txt</kbd>, <kbd>uname -a</kbd>, or <kbd>date</kbd>.
-          Commands outside the fixed sandbox cannot be installed or reached.
+          Try <kbd>id</kbd>, <kbd>env</kbd>, <kbd>ls</kbd>,
+          <kbd>cat README.txt</kbd>, <kbd>uname -a</kbd>, or create a file for
+          another visitor. Individual files, processes, input, output, and the
+          shared container all have deliberately small limits.
         </p>
       </section>
 
@@ -132,10 +153,11 @@
         </div>
         <div>
           <p>
-            Shell access stays anonymous. If you choose to register interest,
-            sign in to GitHub and add a 👍 or comment to the project discussion.
-            That GitHub action is optional and is not tied to your shell
-            session.
+            Shell access stays anonymous. Cloudflare verifies that a browser is
+            probably human, but the project does not receive an identity from
+            that check. If you choose to register interest, sign in to GitHub
+            and add a 👍 or comment to the project discussion. That GitHub
+            action is optional and is not tied to your shell session.
           </p>
           <p class="local-cta">
             <a

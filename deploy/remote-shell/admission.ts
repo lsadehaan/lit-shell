@@ -29,6 +29,7 @@ interface PendingLease {
 
 interface ConnectedLease {
   readonly deadline: number;
+  readonly digest: Buffer;
   readonly id: number;
   readonly state: 'active';
 }
@@ -37,17 +38,25 @@ type Lease = ConnectedLease | PendingLease;
 
 export interface AdmissionControllerOptions {
   readonly activeLeaseMs: number;
+  readonly capacity: number;
   readonly now?: () => number;
   readonly pendingLeaseMs: number;
   readonly tokenSource?: () => Buffer;
 }
 
+export interface AdmissionSnapshot {
+  readonly active: number;
+  readonly capacity: number;
+  readonly pending: number;
+}
+
 export class AdmissionController {
   private readonly activeLeaseMs: number;
+  private readonly capacity: number;
   private readonly now: () => number;
   private readonly pendingLeaseMs: number;
   private readonly tokenSource: () => Buffer;
-  private current: Lease | undefined;
+  private readonly leases = new Map<number, Lease>();
   private nextLeaseId = 1;
 
   constructor(options: AdmissionControllerOptions) {
@@ -55,6 +64,7 @@ export class AdmissionController {
       options.activeLeaseMs,
       'activeLeaseMs',
     );
+    this.capacity = positiveInteger(options.capacity, 'capacity');
     this.pendingLeaseMs = positiveInteger(
       options.pendingLeaseMs,
       'pendingLeaseMs',
@@ -65,8 +75,8 @@ export class AdmissionController {
 
   issue(): AdmissionGrant {
     const now = this.now();
-    this.expireCurrent(now);
-    if (this.current) {
+    this.expireLeases(now);
+    if (this.leases.size >= this.capacity) {
       throw new AdmissionUnavailableError(this.retryAfter(now));
     }
 
@@ -77,61 +87,82 @@ export class AdmissionController {
       );
     }
     const token = tokenBytes.toString('base64url');
+    const digest = digestToken(token);
+    if (
+      Array.from(this.leases.values()).some((lease) =>
+        timingSafeEqual(digest, lease.digest),
+      )
+    ) {
+      throw new Error('The admission token source returned a duplicate token');
+    }
     const expiresAt = now + this.pendingLeaseMs;
-    this.current = {
-      digest: digestToken(token),
+    this.leases.set(this.nextLeaseId, {
+      digest,
       expiresAt,
       id: this.nextLeaseId,
       state: 'pending',
-    };
+    });
     this.nextLeaseId += 1;
     return { expiresAt, token };
   }
 
   consume(token: string): ActiveLease | undefined {
     const now = this.now();
-    this.expireCurrent(now);
-    const lease = this.current;
-    if (!lease || lease.state !== 'pending') return undefined;
-
+    this.expireLeases(now);
     const candidate = digestToken(token);
-    if (!timingSafeEqual(candidate, lease.digest)) return undefined;
+    const lease = Array.from(this.leases.values()).find(
+      (entry) =>
+        entry.state === 'pending' && timingSafeEqual(candidate, entry.digest),
+    );
+    if (!lease || lease.state !== 'pending') return undefined;
 
     const active = {
       deadline: now + this.activeLeaseMs,
       id: lease.id,
     };
-    this.current = { ...active, state: 'active' };
+    this.leases.set(lease.id, {
+      ...active,
+      digest: lease.digest,
+      state: 'active',
+    });
     return active;
   }
 
   release(id: number): boolean {
-    if (this.current?.id !== id) return false;
-    this.current = undefined;
-    return true;
+    return this.leases.delete(id);
   }
 
-  status(): 'active' | 'available' | 'reserved' {
-    this.expireCurrent(this.now());
-    if (!this.current) return 'available';
-    return this.current.state === 'active' ? 'active' : 'reserved';
+  reset(): void {
+    this.leases.clear();
   }
 
-  private expireCurrent(now: number): void {
-    const lease = this.current;
-    if (
-      (lease?.state === 'pending' && lease.expiresAt <= now) ||
-      (lease?.state === 'active' && lease.deadline <= now)
-    ) {
-      this.current = undefined;
+  snapshot(): AdmissionSnapshot {
+    this.expireLeases(this.now());
+    let active = 0;
+    let pending = 0;
+    for (const lease of this.leases.values()) {
+      if (lease.state === 'active') active += 1;
+      else pending += 1;
+    }
+    return { active, capacity: this.capacity, pending };
+  }
+
+  private expireLeases(now: number): void {
+    for (const [id, lease] of this.leases) {
+      if (
+        (lease.state === 'pending' && lease.expiresAt <= now) ||
+        (lease.state === 'active' && lease.deadline <= now)
+      ) {
+        this.leases.delete(id);
+      }
     }
   }
 
   private retryAfter(now: number): number {
-    const lease = this.current;
-    if (!lease) return 1;
-    const end = lease.state === 'pending' ? lease.expiresAt : lease.deadline;
-    return Math.ceil(Math.max(1, end - now) / 1000);
+    const deadlines = Array.from(this.leases.values(), (lease) =>
+      lease.state === 'pending' ? lease.expiresAt : lease.deadline,
+    );
+    return Math.ceil(Math.max(1, Math.min(...deadlines) - now) / 1000);
   }
 }
 

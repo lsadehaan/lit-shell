@@ -150,7 +150,11 @@ describe('TerminalServer terminal I/O (black-box)', () => {
     const ownerFrom = owner.mark();
     const participantFrom = participant.mark();
 
-    owner.send({ type: 'close', sessionId: session.id });
+    owner.send({
+      type: 'close',
+      sessionId: session.id,
+      requestId: 'owner-close-request',
+    });
 
     const [ownerClosed, participantClosed] = await Promise.all([
       owner.waitForType('sessionClosed', { from: ownerFrom }),
@@ -163,8 +167,59 @@ describe('TerminalServer terminal I/O (black-box)', () => {
         reason: 'owner_closed',
       });
     }
+    expect(ownerClosed).toMatchObject({ requestId: 'owner-close-request' });
+    expect(participantClosed.requestId).toBeUndefined();
     await waitUntil(() => server!.terminal.getStats().sessionCount === 0, {
       description: 'closed PTY session to be removed',
+    });
+  });
+
+  it('correlates an error when closing a session that does not exist', async () => {
+    server = await startTestServer();
+    const client = await server.connect();
+    const from = client.mark();
+
+    client.send({
+      type: 'close',
+      sessionId: 'missing-session',
+      requestId: 'missing-close-request',
+    });
+
+    await expect(
+      client.waitFor(
+        (message) => message.requestId === 'missing-close-request',
+        { from },
+      ),
+    ).resolves.toMatchObject({
+      type: 'error',
+      requestId: 'missing-close-request',
+      sessionId: 'missing-session',
+      error: 'Session not found: missing-session',
+    });
+  });
+
+  it('correlates an error when writing to a session that does not exist', async () => {
+    server = await startTestServer();
+    const client = await server.connect();
+    const from = client.mark();
+
+    client.send({
+      type: 'data',
+      sessionId: 'missing-session',
+      data: 'echo should-not-run\n',
+      requestId: 'missing-data-request',
+    });
+
+    await expect(
+      client.waitFor(
+        (message) => message.requestId === 'missing-data-request',
+        { from },
+      ),
+    ).resolves.toMatchObject({
+      type: 'error',
+      requestId: 'missing-data-request',
+      sessionId: 'missing-session',
+      error: 'Session not found: missing-session',
     });
   });
 

@@ -87,4 +87,63 @@ describe('TerminalServer server-owned spawn policy (black-box)', () => {
     expect(output).not.toContain(secretName);
     expect(output).not.toContain('host-secret-value');
   });
+
+  it.each(['localUid', 'localGid'])(
+    'does not expose the server-owned %s option to clients',
+    async (name) => {
+      server = await startTestServer();
+      const client = await server.connect();
+      const from = client.mark();
+
+      client.send({ type: 'spawn', options: { [name]: 0 } });
+
+      const error = await expectProtocolError(client, from);
+      expect(error.error).toBe(`spawn options contains unknown key: ${name}`);
+      expect(server.terminal.getStats()).toMatchObject({ sessionCount: 0 });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'runs a real local PTY with the fixed server-owned identity',
+    async () => {
+      if (
+        typeof process.getuid !== 'function' ||
+        typeof process.getgid !== 'function'
+      ) {
+        throw new Error('POSIX identity APIs are unavailable');
+      }
+      const localUid = process.getuid();
+      const localGid = process.getgid();
+      server = await startTestServer({
+        allowedClientOptions: [],
+        localUid,
+        localGid,
+        localEnvironment: {
+          HOME: process.cwd(),
+          PATH: '/usr/bin:/bin',
+          PS1: '',
+          TERM: 'xterm-256color',
+        },
+      });
+      const client = await server.connect();
+      const from = client.mark();
+
+      client.send({ type: 'spawn' });
+
+      const spawned = await client.waitForType('spawned', { from });
+      const sessionId = spawned.sessionId as string;
+      const outputFrom = client.mark();
+      client.send({
+        type: 'data',
+        sessionId,
+        data: `stty -echo; printf 'uid=%s gid=%s\\n' "$(id -u)" "$(id -g)"\n`,
+      });
+      const output = await client.waitForOutput(
+        `uid=${localUid} gid=${localGid}`,
+        { from: outputFrom, sessionId },
+      );
+
+      expect(output).toContain(`uid=${localUid} gid=${localGid}`);
+    },
+  );
 });

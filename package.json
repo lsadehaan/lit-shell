@@ -50,7 +50,7 @@
     "release:verify": "npm run validate && npm run package:check",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/demo-websocket.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
+    "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/demo-websocket.test.ts tests/server-config-validation.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:quality-policy": "node --test tests/quality-baseline-policy.test.js tests/install-script-policy.test.js tests/pages-remote-config.test.js",

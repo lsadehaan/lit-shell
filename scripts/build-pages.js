@@ -31,19 +31,22 @@ if (renderedHtml === sourceHtml) {
 
 const remoteConfig = pagesRemoteConfig(
   process.env.LIT_SHELL_REMOTE_DEMO_ORIGIN,
+  process.env.LIT_SHELL_TURNSTILE_SITE_KEY,
 );
 const remoteSourceHtml = await readFile(
   resolve(repositoryRoot, 'demo/remote/index.html'),
   'utf8',
 );
-const remoteHtml = replaceRequired(
-  replaceRequired(
-    replaceRequired(remoteSourceHtml, '__LIT_SHELL_BUILD__', buildRevision),
-    '__LIT_SHELL_REMOTE_CONNECT_SRC__',
-    remoteConfig.connectSource,
-  ),
-  '__LIT_SHELL_REMOTE_ORIGIN__',
-  remoteConfig.origin,
+const remoteHtml = [
+  ['__LIT_SHELL_BUILD__', buildRevision],
+  ['__LIT_SHELL_REMOTE_CONNECT_SRC__', remoteConfig.connectSource],
+  ['__LIT_SHELL_REMOTE_FRAME_SRC__', remoteConfig.frameSource],
+  ['__LIT_SHELL_REMOTE_ORIGIN__', remoteConfig.origin],
+  ['__LIT_SHELL_REMOTE_SCRIPT_SRC__', remoteConfig.scriptSource],
+  ['__LIT_SHELL_TURNSTILE_SITE_KEY__', remoteConfig.siteKey],
+].reduce(
+  (source, [placeholder, value]) => replaceRequired(source, placeholder, value),
+  remoteSourceHtml,
 );
 
 await rm(siteRoot, { force: true, recursive: true });

@@ -34,8 +34,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
@@ -74,8 +73,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
@@ -108,8 +106,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
@@ -178,8 +175,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
@@ -226,7 +222,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -283,14 +279,13 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
           cache: pip
@@ -331,8 +326,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Install the repository npm version
         run: npm install --global npm@11.19.0
@@ -379,7 +373,7 @@ jobs:
   container-integrity:
     name: Container build and runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -397,6 +391,17 @@ jobs:
 
       - name: Build production image
         run: docker build --file docker/Dockerfile --tag lit-shell-ci .
+
+      - name: Verify the runtime excludes package managers
+        run: |
+          docker run --rm --entrypoint /bin/sh lit-shell-ci -c '
+            for command in corepack npm npx yarn yarnpkg; do
+              if command -v "$command" >/dev/null 2>&1; then
+                echo "unexpected runtime command: $command" >&2
+                exit 1
+              fi
+            done
+          '
 
       - name: Verify non-root PTY runtime and health check
         run: |
@@ -466,8 +471,17 @@ jobs:
             --env LIT_SHELL_SMOKE_CONTAINER="$target_name" \
             "$server_name" node tests/docker-protocol-smoke.mjs
 
+      - name: Scan the final image for fixed high-severity vulnerabilities
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+            image --exit-code 1 --ignore-unfixed \
+            --scanners vuln --severity HIGH,CRITICAL \
+            lit-shell-ci
+
   remote-demo-integrity:
-    name: Remote demo sandbox and image
+    name: Remote demo shared environment and image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -477,21 +491,39 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate and build the hardened image
+      - name: Validate and build the disposable image
         run: |
           docker build --check --file deploy/remote-shell/Dockerfile .
           docker build --file deploy/remote-shell/Dockerfile \
             --tag lit-shell-remote-demo-ci .
           test "$(docker image inspect --format '{{.Config.User}}' \
-            lit-shell-remote-demo-ci)" = '65531:65531'
+            lit-shell-remote-demo-ci)" = '0:0'
+          docker run --rm --entrypoint /bin/sh lit-shell-remote-demo-ci -c '
+            set -eu
+            for command in corepack npm npx yarn yarnpkg; do
+              if command -v "$command" >/dev/null 2>&1; then
+                echo "unexpected remote demo runtime command: $command" >&2
+                exit 1
+              fi
+            done
+            test -z "$(find / -xdev -type f -perm /6000 -print -quit)"
+            test -d /app/node_modules/ws
+            test -d /app/node_modules/node-pty
+            test -d /app/node_modules/node-addon-api
+            test "$(find /app/node_modules -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3
+          '
 
-      - name: Prove a stripped privilege boundary fails closed
+      - name: Prove a missing identity capability fails closed
         run: |
           container_name='lit-shell-remote-demo-negative-ci'
           trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
           docker run --detach --name "$container_name" \
-            --read-only --security-opt no-new-privileges:true \
-            --env LIT_SHELL_ALLOWED_ORIGIN=https://pages.test \
+            --read-only --tmpfs /workspace:mode=0755,size=32m \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
+            --cap-add KILL --cap-add SETGID --cap-add SETPCAP \
+            --security-opt no-new-privileges:true \
+            --env LIT_SHELL_ALLOWED_ORIGIN=https://example.com \
+            --env LIT_SHELL_TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA \
             lit-shell-remote-demo-ci
           for attempt in $(seq 1 20); do
             status="$(docker inspect --format '{{.State.Status}}' "$container_name")"
@@ -503,21 +535,81 @@ jobs:
           test "$(docker inspect --format '{{.State.Status}}' "$container_name")" = exited
           test "$(docker inspect --format '{{.State.ExitCode}}' "$container_name")" -ne 0
           docker logs "$container_name" 2>&1 \
-            | grep --quiet --fixed-strings 'setuid privilege boundary is unavailable'
+            | grep --quiet --fixed-strings \
+              'The fixed guest identity transition is unavailable'
 
-      - name: Exercise hostile commands in the real sandbox
+      - name: Prove failed CAPTCHA verification with the required identity capability
+        run: |
+          set -eu
+          container_name='lit-shell-remote-demo-captcha-failure-ci'
+          cleanup() {
+            docker rm --force "$container_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT INT TERM
+
+          docker run --detach --name "$container_name" \
+            --read-only --tmpfs /tmp:mode=0755,size=8m \
+            --tmpfs /workspace:mode=0755,size=32m \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
+            --cap-add KILL --cap-add SETGID --cap-add SETPCAP \
+            --cap-add SETUID --security-opt no-new-privileges:true \
+            --memory 512m --pids-limit 64 --cpus 1 \
+            --health-interval=1s --health-start-period=1s \
+            --env LIT_SHELL_ALLOWED_ORIGIN=https://example.com \
+            --env LIT_SHELL_TURNSTILE_SECRET_KEY=2x0000000000000000000000000000000AA \
+            lit-shell-remote-demo-ci
+
+          for attempt in $(seq 1 45); do
+            state="$(docker inspect --format '{{.State.Status}}' "$container_name")"
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_name")"
+            if [ "$health" = healthy ]; then
+              break
+            fi
+            if [ "$state" = exited ] || [ "$health" = unhealthy ]; then
+              docker logs "$container_name"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")" = healthy
+
+          docker exec "$container_name" node --input-type=module --eval '
+            const response = await fetch(
+              "http://127.0.0.1:10000/v1/admissions",
+              {
+                body: new URLSearchParams({
+                  turnstileToken: "well-formed-test-response",
+                }),
+                headers: { Origin: "https://example.com" },
+                method: "POST",
+              },
+            );
+            if (response.status !== 403) {
+              throw new Error(`expected CAPTCHA rejection status 403, received ${response.status}`);
+            }
+            const body = await response.json();
+            if (body.error !== "Human verification failed") {
+              throw new Error("CAPTCHA rejection did not fail closed");
+            }
+          '
+
+      - name: Exercise shared guests, CAPTCHA, quotas, and epoch reset
         env:
           BUILD_REVISION: ${{ github.sha }}
         run: |
           container_name='lit-shell-remote-demo-positive-ci'
           docker run --detach --name "$container_name" \
-            --read-only --tmpfs /tmp:mode=1777,size=8m \
+            --read-only --tmpfs /tmp:mode=0755,size=8m \
+            --tmpfs /workspace:mode=0755,size=32m \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
+            --cap-add KILL --cap-add SETGID --cap-add SETPCAP \
+            --cap-add SETUID --security-opt no-new-privileges:true \
             --memory 512m --pids-limit 64 --cpus 1 \
             --health-interval=1s --health-start-period=1s \
-            --env LIT_SHELL_ALLOWED_ORIGIN=https://pages.test \
+            --env LIT_SHELL_ALLOWED_ORIGIN=https://example.com \
             --env LIT_SHELL_HOST_CANARY=gateway-environment-must-not-cross \
+            --env LIT_SHELL_TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA \
             --env RENDER_GIT_COMMIT="$BUILD_REVISION" \
-            --volume "$PWD/README.md:/outside-canary:ro" \
             --volume "$PWD/tests/fixtures/remote-demo-container-smoke.mjs:/app/remote-demo-container-smoke.mjs:ro" \
             lit-shell-remote-demo-ci
           for attempt in $(seq 1 45); do
@@ -532,9 +624,6 @@ jobs:
             sleep 1
           done
           test "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")" = healthy
-          test "$(docker exec "$container_name" \
-            /usr/local/bin/lit-shell-sandbox --self-test)" = \
-            'lit-shell-sandbox-self-test-ok'
           docker exec \
             --env LIT_SHELL_SMOKE_ORIGIN=http://127.0.0.1:10000 \
             "$container_name" node /app/remote-demo-container-smoke.mjs
@@ -616,6 +705,7 @@ jobs:
     needs: ci-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    environment: remote-demo-production
 
     steps:
       - name: Check out the exact reviewed revision
@@ -635,19 +725,27 @@ jobs:
       - name: Install the locked smoke-test dependency
         run: npm ci --omit=dev --ignore-scripts
 
-      - name: Validate the optional production deployment endpoints
+      - name: Validate the optional production deployment configuration
         id: deployment_config
         env:
           REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_TOKEN: ${{ secrets.RENDER_API_TOKEN }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
         run: |
-          if [ -z "$REMOTE_DEMO_ORIGIN" ] && [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] \
+            && [ -z "$RENDER_API_TOKEN" ] \
+            && [ -z "$RENDER_SERVICE_ID" ] \
+            && [ -z "$TURNSTILE_SITE_KEY" ]; then
             echo 'configured=false' >> "$GITHUB_OUTPUT"
             echo 'Remote demo deployment is not configured; keeping it disabled.'
             exit 0
           fi
-          if [ -z "$REMOTE_DEMO_ORIGIN" ] || [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo 'REMOTE_DEMO_ORIGIN and RENDER_DEPLOY_HOOK_URL must be configured together.' >&2
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] \
+            || [ -z "$RENDER_API_TOKEN" ] \
+            || [ -z "$RENDER_SERVICE_ID" ] \
+            || [ -z "$TURNSTILE_SITE_KEY" ]; then
+            echo 'REMOTE_DEMO_ORIGIN, RENDER_API_TOKEN, RENDER_SERVICE_ID, and TURNSTILE_SITE_KEY must be configured together.' >&2
             exit 1
           fi
           node --input-type=module --eval '
@@ -656,16 +754,12 @@ jobs:
               origin.protocol !== "https:" ||
               origin.origin !== process.env.REMOTE_DEMO_ORIGIN
             ) throw new Error("REMOTE_DEMO_ORIGIN must be one exact HTTPS origin");
-            const hook = new URL(process.env.RENDER_DEPLOY_HOOK_URL ?? "");
-            if (
-              hook.protocol !== "https:" ||
-              hook.origin !== "https://api.render.com" ||
-              hook.username ||
-              hook.password ||
-              !hook.pathname.startsWith("/deploy/") ||
-              !hook.searchParams.has("key") ||
-              hook.hash
-            ) throw new Error("RENDER_DEPLOY_HOOK_URL is not a Render deploy hook");
+            if (!/^srv-[a-z0-9]+$/.test(process.env.RENDER_SERVICE_ID ?? "")) {
+              throw new Error("RENDER_SERVICE_ID must be one Render service ID");
+            }
+            if (!/^[A-Za-z0-9_-]{20,64}$/.test(process.env.TURNSTILE_SITE_KEY ?? "")) {
+              throw new Error("TURNSTILE_SITE_KEY is malformed");
+            }
           '
           echo 'configured=true' >> "$GITHUB_OUTPUT"
 
@@ -673,15 +767,26 @@ jobs:
         if: ${{ steps.deployment_config.outputs.configured == 'true' }}
         env:
           BUILD_REVISION: ${{ github.sha }}
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_TOKEN: ${{ secrets.RENDER_API_TOKEN }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
         run: |
-          case "$RENDER_DEPLOY_HOOK_URL" in
-            *\?*) separator='&' ;;
-            *) separator='?' ;;
-          esac
-          curl --fail-with-body --silent --show-error --max-time 30 \
+          payload="$(jq --null-input --compact-output \
+            --arg commit_id "$BUILD_REVISION" \
+            '{commitId: $commit_id, clearCache: "do_not_clear"}')"
+          deploy_status="$(curl --silent --show-error --max-time 30 \
             --proto '=https' --request POST --output render-deploy.json \
-            "${RENDER_DEPLOY_HOOK_URL}${separator}ref=${BUILD_REVISION}"
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $RENDER_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys")"
+          case "$deploy_status" in
+            201|202) ;;
+            *)
+              echo "Render rejected the exact-commit deployment with HTTP $deploy_status" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Wait for the exact backend revision
         if: ${{ steps.deployment_config.outputs.configured == 'true' }}
@@ -705,11 +810,88 @@ jobs:
             sleep 10
           done
 
-      - name: Exercise the live sandbox boundary and quotas
+      - name: Verify the live shared demo control plane
         if: ${{ steps.deployment_config.outputs.configured == 'true' }}
         env:
-          LIT_SHELL_EXPECTED_REVISION: ${{ github.sha }}
-          LIT_SHELL_HOST_CANARY: gateway-environment-must-not-cross
-          LIT_SHELL_SMOKE_BROWSER_ORIGIN: https://www.idnteq.net
-          LIT_SHELL_SMOKE_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
-        run: node tests/fixtures/remote-demo-container-smoke.mjs
+          BUILD_REVISION: ${{ github.sha }}
+          LIT_SHELL_ALLOWED_ORIGIN: https://www.idnteq.net
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+        run: |
+          curl --fail --silent --show-error --max-time 30 \
+            --proto '=https' --output remote-ready.json \
+            "$REMOTE_DEMO_ORIGIN/health/ready"
+          jq --exit-status --arg revision "$BUILD_REVISION" '
+            .status == "ready"
+            and .revision == $revision
+            and .admission.capacity == 4
+            and (.resetAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > now
+          ' remote-ready.json >/dev/null
+
+          node --input-type=module --eval '
+            const serviceOrigin = process.env.REMOTE_DEMO_ORIGIN;
+            const allowedOrigin = process.env.LIT_SHELL_ALLOWED_ORIGIN;
+            if (!serviceOrigin || !allowedOrigin) {
+              throw new Error("remote demo smoke-test origins are required");
+            }
+            const postAdmission = (origin, body) =>
+              fetch(`${serviceOrigin}/v1/admissions`, {
+                body,
+                headers: {
+                  "content-type": "application/x-www-form-urlencoded",
+                  Origin: origin,
+                },
+                method: "POST",
+              });
+
+            const disallowed = await postAdmission(
+              "https://disallowed.invalid",
+              new URLSearchParams({
+                turnstileToken: "well-formed-but-never-verified",
+              }),
+            );
+            if (disallowed.status !== 403) {
+              throw new Error(`expected disallowed-origin status 403, received ${disallowed.status}`);
+            }
+            if (disallowed.headers.has("access-control-allow-origin")) {
+              throw new Error("disallowed origin received a CORS allowance");
+            }
+            const disallowedBody = await disallowed.json();
+            if (disallowedBody.error !== "Origin is not allowed") {
+              throw new Error("disallowed origin reached CAPTCHA verification");
+            }
+
+            const malformed = await postAdmission(
+              allowedOrigin,
+              new URLSearchParams({ turnstileToken: "" }),
+            );
+            if (malformed.status !== 400) {
+              throw new Error(`expected malformed-token status 400, received ${malformed.status}`);
+            }
+            if (
+              malformed.headers.get("access-control-allow-origin") !==
+                allowedOrigin ||
+              malformed.headers.get("vary") !== "Origin"
+            ) {
+              throw new Error("allowed-origin CORS headers are not exact");
+            }
+            const malformedBody = await malformed.json();
+            if (malformedBody.error !== "Verification token is malformed") {
+              throw new Error("malformed token did not fail before CAPTCHA verification");
+            }
+          '
+
+          websocket_status="$(curl --http1.1 --silent --show-error \
+            --max-time 30 --proto '=https' --output websocket-rejection.txt \
+            --write-out '%{http_code}' \
+            --header "Origin: $LIT_SHELL_ALLOWED_ORIGIN" \
+            --header 'Connection: Upgrade' \
+            --header 'Upgrade: websocket' \
+            --header 'Sec-WebSocket-Version: 13' \
+            --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            --header 'Sec-WebSocket-Protocol: lit-shell.v1' \
+            "$REMOTE_DEMO_ORIGIN/terminal")"
+          if [ "$websocket_status" != 401 ]; then
+            cat websocket-rejection.txt >&2
+            echo "Expected unauthenticated WebSocket status 401; received $websocket_status" >&2
+            exit 1
+          fi

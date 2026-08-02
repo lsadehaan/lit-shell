@@ -19,10 +19,13 @@ operating-system commands. A real terminal still requires the secured
 Node/WebSocket server described below.
 
 The separate [opt-in remote demo](https://www.idnteq.net/lit-shell/remote/)
-provides a real, anonymous PTY for at most 60 seconds when its independently
-tested sandbox backend is available. It starts no network request until the
-visitor presses the button and remains disabled if the exact reviewed backend
-revision is not configured.
+provides up to four real PTYs in one anonymous, shared Render container. A hard
+Cloudflare Turnstile gate is verified by the server before access, and the
+entire UID/GID 65532 guest environment—files, processes, and connections—is
+discarded on a fixed global five-minute schedule. Visitors are deliberately not
+isolated from one another: never enter secrets or personal data. The page starts
+no network request until the visitor presses the button and remains disabled if
+the exact reviewed backend revision and Turnstile site key are not configured.
 
 > [!CAUTION]
 > A terminal endpoint is remote code execution by design. lit-shell does not
@@ -742,6 +745,20 @@ For any non-local deployment:
 
 Allowlists are defense in depth. They are not authentication or isolation.
 Never expose the WebSocket endpoint directly to an untrusted network.
+
+On POSIX hosts, a privileged service can force every local PTY to drop to one
+server-owned account by setting both `localUid` and `localGid`. Clients cannot
+set or override these values, and they are never applied to Docker sessions.
+The pair must be non-negative integers supported by `node-pty`; Windows rejects
+the options. A fixed process identity is useful least privilege, but is not a
+filesystem, network, or resource sandbox by itself.
+
+```javascript
+const server = new TerminalServer({
+  localUid: 65532,
+  localGid: 65532,
+});
+```
 
 A minimal hardened configuration starts with narrow allowlists and limits:
 

@@ -34,6 +34,10 @@ describe('TerminalServer protocol validation (black-box)', () => {
     ['a JSON number', '42'],
     ['an object with no type', '{}'],
     [
+      'a non-string request ID',
+      JSON.stringify({ type: 'listSessions', requestId: 42 }),
+    ],
+    [
       'an unknown message type',
       JSON.stringify({ type: 'not-a-protocol-message' }),
     ],

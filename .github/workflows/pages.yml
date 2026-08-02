@@ -53,6 +53,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
           REPOSITORY: ${{ github.repository }}
+          TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
         run: |
           wait_for_check() {
             check_name="$1"
@@ -78,8 +79,12 @@ jobs:
             done
           }
           wait_for_check 'CI gate' 180
-          if [ -z "$REMOTE_DEMO_ORIGIN" ]; then
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] && [ -z "$TURNSTILE_SITE_KEY" ]; then
             exit 0
+          fi
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] || [ -z "$TURNSTILE_SITE_KEY" ]; then
+            echo 'REMOTE_DEMO_ORIGIN and TURNSTILE_SITE_KEY must be configured together.' >&2
+            exit 1
           fi
           wait_for_check 'Deploy and smoke test remote demo' 240
           node -e '
@@ -134,6 +139,7 @@ jobs:
       - name: Build and verify the static artifact
         env:
           LIT_SHELL_REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+          LIT_SHELL_TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
         run: npm run pages:check
 
       - name: Configure GitHub Pages
@@ -180,6 +186,7 @@ jobs:
           BUILD_REVISION: ${{ github.sha }}
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
           REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+          TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
         run: |
           case "$PAGE_URL" in
             https://lsadehaan.github.io/lit-shell/|https://www.idnteq.net/lit-shell/) ;;
@@ -243,6 +250,12 @@ jobs:
           if [ -n "$REMOTE_DEMO_ORIGIN" ]; then
             grep --quiet --fixed-strings \
               "content=\"$REMOTE_DEMO_ORIGIN\"" remote.html
+            test -n "$TURNSTILE_SITE_KEY"
+            grep --quiet --fixed-strings \
+              "content=\"$TURNSTILE_SITE_KEY\"" remote.html
+            grep --quiet --fixed-strings \
+              'frame-src https://challenges.cloudflare.com' remote.html
           else
+            test -z "$TURNSTILE_SITE_KEY"
             grep --quiet --fixed-strings "connect-src 'none'" remote.html
           fi

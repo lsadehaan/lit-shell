@@ -1,34 +1,49 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { access, readFile, readdir } from 'node:fs/promises';
 
 import { WebSocket } from 'ws';
 
 const serviceOrigin =
   process.env.LIT_SHELL_SMOKE_ORIGIN ?? 'http://127.0.0.1:10000';
 const browserOrigin =
-  process.env.LIT_SHELL_SMOKE_BROWSER_ORIGIN ?? 'https://pages.test';
+  process.env.LIT_SHELL_SMOKE_BROWSER_ORIGIN ?? 'https://example.com';
 const hostCanary = process.env.LIT_SHELL_HOST_CANARY;
 const expectedRevision =
   process.env.LIT_SHELL_EXPECTED_REVISION ?? process.env.RENDER_GIT_COMMIT;
+const dummyTurnstileToken = 'XXXX.DUMMY.TOKEN.XXXX';
+const webSocketUrl = `${serviceOrigin.replace(/^http/u, 'ws')}/terminal`;
+const sharedHostPaths = [
+  { label: 'TMP', path: '/tmp' },
+  { label: 'VAR_TMP', path: '/var/tmp' },
+  { label: 'RUN_LOCK', path: '/run/lock' },
+  { label: 'DEV_SHM', path: '/dev/shm' },
+  { label: 'DEV_MQUEUE', path: '/dev/mqueue' },
+];
 
-assert.ok(
-  hostCanary,
-  'The container smoke test requires a host-environment canary',
-);
-assert.match(
-  expectedRevision ?? '',
-  /^[0-9a-f]{40}$/u,
-  'The container smoke test requires an exact expected revision',
-);
+assert.ok(hostCanary, 'The smoke test requires a gateway environment canary');
+assert.match(expectedRevision ?? '', /^[0-9a-f]{40}$/u);
 
-const live = await fetch(`${serviceOrigin}/health/live`);
-assert.equal(live.status, 200);
-assert.equal(live.headers.get('cache-control'), 'no-store');
-assert.deepEqual(await live.json(), {
-  revision: expectedRevision,
-  status: 'live',
-});
+const initialLive = await fetch(`${serviceOrigin}/health/live`);
+assert.equal(initialLive.status, 200);
+assert.equal(initialLive.headers.get('cache-control'), 'no-store');
+const initialHealth = await initialLive.json();
+assert.equal(initialHealth.revision, expectedRevision);
+assert.equal(initialHealth.status, 'live');
+assert.equal(initialHealth.epoch, 1);
+assert.ok(Date.parse(initialHealth.resetAt) > Date.now());
+
+const gatewayStatus = await findGatewayStatus();
+for (const capabilitySet of ['CapBnd', 'CapEff', 'CapPrm']) {
+  assert.match(
+    gatewayStatus,
+    new RegExp(`^${capabilitySet}:\\s+0{14}e3$`, 'mu'),
+  );
+}
+assert.match(gatewayStatus, /^CapAmb:\s+0{16}$/mu);
+assert.match(gatewayStatus, /^CapInh:\s+0{16}$/mu);
+assert.match(gatewayStatus, /^Groups:\s*$/mu);
 
 const ready = await fetch(`${serviceOrigin}/health/ready`, {
   headers: { Origin: browserOrigin },
@@ -36,188 +51,290 @@ const ready = await fetch(`${serviceOrigin}/health/ready`, {
 assert.equal(ready.status, 200);
 assert.equal(ready.headers.get('access-control-allow-origin'), browserOrigin);
 assert.equal(ready.headers.get('access-control-expose-headers'), 'Retry-After');
-assert.equal((await ready.json()).status, 'ready');
-
-const wrongOrigin = await requestAdmission('https://attacker.test');
-assert.equal(wrongOrigin.status, 403);
-
-const grant = await issueAdmission();
-const busy = await requestAdmission(browserOrigin);
-assert.equal(busy.status, 429);
-assert.equal(busy.headers.get('access-control-expose-headers'), 'Retry-After');
-assert.ok(Number(busy.headers.get('retry-after')) > 0);
-
-const webSocketUrl = `${serviceOrigin.replace(/^http/u, 'ws')}/terminal`;
-await expectUpgradeRejected(webSocketUrl, ['lit-shell.v1'], 401);
-await expectUpgradeRejected(
-  webSocketUrl,
-  ['lit-shell.v1', `lit-shell.admission.${grant.token}`],
-  403,
-  'https://attacker.test',
-);
-
-const first = await connect(grant.token);
-assert.equal(first.socket.protocol, 'lit-shell.v1');
-assert.ok(!first.socket.url.includes(grant.token));
-await first.waitFor((message) => message.type === 'serverInfo');
-
-first.send({
-  options: { allowJoin: false, cols: 80, rows: 24 },
-  requestId: 'sandbox-boundaries',
-  type: 'spawn',
+assert.deepEqual((await ready.json()).admission, {
+  active: 0,
+  capacity: 4,
+  pending: 0,
 });
-const spawned = await first.waitFor(
-  (message) => message.requestId === 'sandbox-boundaries',
-);
-assert.equal(spawned.type, 'spawned');
-assert.equal(typeof spawned.sessionId, 'string');
-const sessionId = spawned.sessionId;
-await first.waitForOutput(sessionId, 'lit-shell remote demo', 5_000);
 
-const echoDisabledMarker = `__ECHO_DISABLED_${randomUUID().replaceAll('-', '')}__`;
+assert.equal((await requestAdmission('https://attacker.test')).status, 403);
+assert.equal(
+  (
+    await fetch(`${serviceOrigin}/v1/admissions`, {
+      headers: { Origin: browserOrigin },
+      method: 'POST',
+    })
+  ).status,
+  415,
+);
+await expectUpgradeRejected(webSocketUrl, ['lit-shell.v1'], 401);
+
+const grants = await Promise.all(Array.from({ length: 4 }, issueAdmission));
+const clients = await Promise.all(grants.map((grant) => connect(grant.token)));
+for (const client of clients) {
+  assert.equal(client.socket.protocol, 'lit-shell.v1');
+  await client.waitFor((message) => message.type === 'serverInfo');
+}
+const full = await requestAdmission(browserOrigin);
+assert.equal(full.status, 429);
+assert.ok(Number(full.headers.get('retry-after')) > 0);
+
+const first = clients[0];
+const second = clients[1];
+assert.ok(first && second);
+const firstSession = await spawn(first, 'first');
+const secondSession = await spawn(second, 'second');
+await Promise.all([
+  disableEcho(first, firstSession),
+  disableEcho(second, secondSession),
+]);
+const marker = `shared-${randomUUID().replaceAll('-', '')}`;
+const backgroundMarker = `background-${randomUUID().replaceAll('-', '')}`;
+const hostPathProbe = `lit-shell-${randomUUID().replaceAll('-', '')}`;
+
 first.send({
-  data: `stty -echo; printf '${echoDisabledMarker}\\n'\n`,
-  sessionId,
+  data: `printf '${marker}' > shared.txt; sleep 1000 & printf '${backgroundMarker}=%s\\n' "$!"\n`,
+  sessionId: firstSession,
   type: 'data',
 });
-await first.waitForOutputOccurrences(sessionId, echoDisabledMarker, 2, 3_000);
-first.clearOutput(sessionId);
+const backgroundOutput = await first.waitForOutput(
+  firstSession,
+  backgroundMarker,
+  5_000,
+);
+const backgroundPid = Number(
+  backgroundOutput.match(new RegExp(`${backgroundMarker}=(?<pid>[0-9]+)`, 'u'))
+    ?.groups?.pid,
+);
+assert.ok(Number.isInteger(backgroundPid) && backgroundPid > 1);
 
-const completionMarker = `__LIT_BOUNDARY_DONE_${randomUUID().replaceAll('-', '')}__`;
-
-first.send({
+second.send({
   data: `${[
-    "printf '\\n__LIT_BOUNDARY_START__\\n'",
+    "printf '__BOUNDARY_START__\\n'",
     "printf 'UID='; id -u",
     "printf 'GID='; id -g",
     "printf 'GROUPS='; id -G",
     "printf 'PWD='; pwd",
+    "printf 'SHARED='; cat shared.txt",
+    "printf '\\nNOFILE='; ulimit -n",
+    "printf 'FILEBLOCKS='; ulimit -f",
+    "if touch /app/guest-write 2>/dev/null; then printf 'APP=WRITABLE\\n'; else printf 'APP=READ_ONLY\\n'; fi",
+    ...sharedHostPaths.flatMap(({ label, path }) => [
+      `if [ -d '${path}' ] && [ ! -L '${path}' ]; then printf '${label}_REAL=YES\\n'; else printf '${label}_REAL=NO\\n'; fi`,
+      `printf '${label}_OWNER='; stat -c '%u:%g' '${path}'`,
+      `printf '${label}_MODE='; stat -c '%a' '${path}'`,
+      `if touch '${path}/${hostPathProbe}' 2>/dev/null; then printf '${label}=WRITABLE\\n'; rm -f '${path}/${hostPathProbe}'; else printf '${label}=READ_ONLY\\n'; fi`,
+    ]),
+    'sysv_shm="$(ipcmk -M 4096)"',
+    'sysv_msg="$(ipcmk -Q)"',
+    'sysv_sem="$(ipcmk -S 1)"',
+    `printf 'SYSV_SHM=%s\\n' "\${sysv_shm##*: }"`,
+    `printf 'SYSV_MSG=%s\\n' "\${sysv_msg##*: }"`,
+    `printf 'SYSV_SEM=%s\\n' "\${sysv_sem##*: }"`,
+    "if [ -x /usr/local/bin/node ]; then printf 'NODE=EXECUTABLE\\n'; else printf 'NODE=BLOCKED\\n'; fi",
+    "if kill -0 1 2>/dev/null; then printf 'PID1=SIGNALABLE\\n'; else printf 'PID1=PROTECTED\\n'; fi",
+    "if cat /proc/1/environ >/dev/null 2>&1; then printf 'ROOTENV=READABLE\\n'; else printf 'ROOTENV=PROTECTED\\n'; fi",
     "printf 'ENV_START\\n'; env; printf 'ENV_END\\n'",
-    "if printf pwned > /home/demo/pwned; then printf 'FS=WRITABLE\\n'; else printf 'FS=READ_ONLY\\n'; fi",
-    "if [ -e /proc/self/status ]; then printf 'PROC=VISIBLE\\n'; else printf 'PROC=ABSENT\\n'; fi",
-    "if [ -e /outside-canary ]; then printf 'OUTSIDE=VISIBLE\\n'; else printf 'OUTSIDE=ABSENT\\n'; fi",
-    "if command -v curl || command -v wget || command -v nc || command -v node || command -v python3 || command -v cc; then printf 'TOOLS=UNSAFE\\n'; else printf 'TOOLS=CURATED\\n'; fi",
-    "if kill -0 1; then printf 'PID1=SIGNALABLE\\n'; else printf 'PID1=PROTECTED\\n'; fi",
-    `printf '${completionMarker}\\n'`,
+    "printf '__BOUNDARY_DONE__\\n'",
   ].join(';')}\n`,
-  sessionId,
+  sessionId: secondSession,
   type: 'data',
 });
-
-const boundaryOutput = await first.waitForOutput(
-  sessionId,
-  completionMarker,
-  5_000,
+const boundary = await second.waitForOutput(
+  secondSession,
+  '__BOUNDARY_DONE__',
+  7_000,
 );
-assert.match(boundaryOutput, /UID=65532\r?\n/u);
-assert.match(boundaryOutput, /GID=65532\r?\n/u);
-assert.match(boundaryOutput, /GROUPS=65532\r?\n/u);
-assert.match(boundaryOutput, /PWD=\/home\/demo\r?\n/u);
-assert.match(boundaryOutput, /FS=READ_ONLY\r?\n/u);
-assert.match(boundaryOutput, /PROC=ABSENT\r?\n/u);
-assert.match(boundaryOutput, /OUTSIDE=ABSENT\r?\n/u);
-assert.match(boundaryOutput, /TOOLS=CURATED\r?\n/u);
-assert.match(boundaryOutput, /PID1=PROTECTED\r?\n/u);
-const environment = boundaryOutput.match(
-  /ENV_START\r?\n(?<value>[\s\S]*?)ENV_END/u,
-)?.groups?.value;
-assert.ok(environment, 'The sandbox did not report its sanitized environment');
-assert.match(environment, /HOME=\/home\/demo\r?\n/u);
-assert.match(environment, /PATH=\/bin:\/usr\/bin\r?\n/u);
+assert.match(boundary, /UID=65532\r?\n/u);
+assert.match(boundary, /GID=65532\r?\n/u);
+assert.match(boundary, /GROUPS=65532\r?\n/u);
+assert.match(boundary, /PWD=\/workspace\/shared\r?\n/u);
+assert.match(boundary, new RegExp(`SHARED=${marker}`, 'u'));
+assert.match(boundary, /NOFILE=64\r?\n/u);
+assert.match(boundary, /FILEBLOCKS=16384\r?\n/u);
+assert.match(boundary, /APP=READ_ONLY\r?\n/u);
+for (const { label } of sharedHostPaths) {
+  assert.match(boundary, new RegExp(`${label}_REAL=YES\\r?\\n`, 'u'));
+  assert.match(boundary, new RegExp(`${label}_OWNER=0:0\\r?\\n`, 'u'));
+  assert.match(boundary, new RegExp(`${label}_MODE=755\\r?\\n`, 'u'));
+  assert.match(boundary, new RegExp(`${label}=READ_ONLY\\r?\\n`, 'u'));
+}
+assert.match(boundary, /NODE=BLOCKED\r?\n/u);
+assert.match(boundary, /PID1=PROTECTED\r?\n/u);
+assert.match(boundary, /ROOTENV=PROTECTED\r?\n/u);
+const environment = boundary.match(/ENV_START\r?\n(?<value>[\s\S]*?)ENV_END/u)
+  ?.groups?.value;
+assert.ok(environment);
+assert.match(environment, /HOME=\/workspace\/shared\r?\n/u);
+assert.match(environment, /TMPDIR=\/workspace\/shared\/tmp\r?\n/u);
+assert.ok(!environment.includes('LIT_SHELL_TURNSTILE_SECRET_KEY'));
 assert.ok(!environment.includes('LIT_SHELL_HOST_CANARY'));
 assert.ok(!environment.includes(hostCanary));
-assert.ok(!environment.includes('NODE_ENV='));
 
-// Disconnect without asking the shell to exit. The gateway must retain the
-// lease until the privileged supervisor proves that every sandbox process is
-// gone and a fresh self-test can acquire its lock.
-await first.close();
+const ipcResources = [
+  { id: ipcId(boundary, 'SYSV_SHM'), table: 'shm' },
+  { id: ipcId(boundary, 'SYSV_MSG'), table: 'msg' },
+  { id: ipcId(boundary, 'SYSV_SEM'), table: 'sem' },
+];
+for (const resource of ipcResources) {
+  const owner = await sysVIpcOwner(resource.table, resource.id);
+  assert.deepEqual(owner, { gid: 65_532, uid: 65_532 });
+}
+
+const closes = clients.map((client) => once(client.socket, 'close'));
+process.kill(1, 'SIGUSR2');
+for (const closed of closes) {
+  const [code, reason] = await closed;
+  assert.equal(code, 1012);
+  assert.equal(reason.toString(), 'Shared demo reset');
+}
+
+const afterReset = await waitForEpoch(2);
+assert.equal(afterReset.status, 'ready');
+assert.deepEqual(afterReset.admission, {
+  active: 0,
+  capacity: 4,
+  pending: 0,
+});
+await assert.rejects(access(`/proc/${String(backgroundPid)}`));
+for (const resource of ipcResources) {
+  assert.equal(await sysVIpcOwner(resource.table, resource.id), undefined);
+}
+
+const replacementGrant = await issueAdmission();
+const replacement = await connect(replacementGrant.token);
+await replacement.waitFor((message) => message.type === 'serverInfo');
+const replacementSession = await spawn(replacement, 'replacement');
+replacement.send({
+  data: "if [ -e shared.txt ]; then printf 'STALE\\n'; else printf 'RESET_OK\\n'; fi\n",
+  sessionId: replacementSession,
+  type: 'data',
+});
+await replacement.waitForOutput(replacementSession, 'RESET_OK', 5_000);
+await replacement.close();
 
 await expectUpgradeRejected(
   webSocketUrl,
-  ['lit-shell.v1', `lit-shell.admission.${grant.token}`],
+  ['lit-shell.v1', `lit-shell.admission.${replacementGrant.token}`],
   401,
 );
 
-const cpuGrant = await issueAdmission();
-const cpu = await connect(cpuGrant.token);
-await cpu.waitFor((message) => message.type === 'serverInfo');
-cpu.send({ requestId: 'cpu-session', type: 'spawn' });
-const cpuSpawned = await cpu.waitFor(
-  (message) => message.requestId === 'cpu-session',
-);
-assert.equal(cpuSpawned.type, 'spawned');
-assert.equal(typeof cpuSpawned.sessionId, 'string');
-await cpu.waitForOutput(cpuSpawned.sessionId, 'lit-shell remote demo', 5_000);
-const cpuStartedAt = performance.now();
-cpu.send({
-  data: 'while :; do :; done\n',
-  sessionId: cpuSpawned.sessionId,
-  type: 'data',
-});
-const cpuExit = await cpu.waitFor(
-  (message) =>
-    message.type === 'exit' && message.sessionId === cpuSpawned.sessionId,
-  58_000,
-);
-const cpuClosed = await cpu.waitFor(
-  (message) =>
-    message.type === 'sessionClosed' &&
-    message.sessionId === cpuSpawned.sessionId,
-  58_000,
-);
-assert.equal(cpuExit.exitCode, 152);
-assert.ok(
-  performance.now() - cpuStartedAt >= 3_500,
-  'The CPU-bound shell exited too quickly to have reached RLIMIT_CPU',
-);
-assert.equal(cpuClosed.reason, 'process_exit');
-await cpu.close();
+console.log('shared remote demo container smoke test passed');
 
-const finalReady = await waitForAvailableReadiness();
-assert.equal(finalReady.status, 200);
-assert.equal((await finalReady.json()).admission, 'available');
+function ipcId(output, label) {
+  const id = Number(
+    output.match(new RegExp(`${label}=(?<id>[0-9]+)\\r?\\n`, 'u'))?.groups?.id,
+  );
+  assert.ok(Number.isSafeInteger(id) && id >= 0, `${label} was not created`);
+  return id;
+}
 
-console.log('remote demo container smoke test passed');
+async function sysVIpcOwner(table, id) {
+  const idColumn = { msg: 'msqid', sem: 'semid', shm: 'shmid' }[table];
+  assert.ok(idColumn);
+  const lines = (await readFile(`/proc/sysvipc/${table}`, 'utf8'))
+    .trim()
+    .split('\n');
+  const headings = lines.shift()?.trim().split(/\s+/u) ?? [];
+  const idIndex = headings.indexOf(idColumn);
+  const uidIndex = headings.indexOf('uid');
+  const gidIndex = headings.indexOf('gid');
+  assert.ok(idIndex >= 0 && uidIndex >= 0 && gidIndex >= 0);
+  for (const line of lines) {
+    const values = line.trim().split(/\s+/u);
+    if (Number(values[idIndex]) === id) {
+      return {
+        gid: Number(values[gidIndex]),
+        uid: Number(values[uidIndex]),
+      };
+    }
+  }
+  return undefined;
+}
 
-async function requestAdmission(origin) {
+async function findGatewayStatus() {
+  const entries = await readdir('/proc', { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    try {
+      const commandLine = await readFile(`/proc/${entry.name}/cmdline`, 'utf8');
+      const arguments_ = commandLine.split('\0').filter(Boolean);
+      if (
+        !['node', '/usr/local/bin/node'].includes(arguments_[0] ?? '') ||
+        arguments_[1] !== '/app/remote-shell-server.mjs'
+      ) {
+        continue;
+      }
+      return readFile(`/proc/${entry.name}/status`, 'utf8');
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error('Could not find the root gateway process');
+}
+
+function requestAdmission(origin) {
   return fetch(`${serviceOrigin}/v1/admissions`, {
+    body: new URLSearchParams({ turnstileToken: dummyTurnstileToken }),
     headers: { Origin: origin },
     method: 'POST',
   });
 }
 
 async function issueAdmission() {
-  const deadline = Date.now() + 7_000;
-  while (Date.now() < deadline) {
-    const response = await requestAdmission(browserOrigin);
-    if (response.status === 201) {
-      const value = await response.json();
-      assert.equal(value.protocol, 'lit-shell.v1');
-      assert.equal(value.webSocketPath, '/terminal');
-      assert.match(value.token, /^[A-Za-z0-9_-]{43}$/u);
-      return value;
-    }
-    assert.ok(
-      response.status === 429 || response.status === 503,
-      `Expected a busy or recovering gateway, received ${String(response.status)}`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('The sandbox lease was not released after verified cleanup');
+  const response = await requestAdmission(browserOrigin);
+  assert.equal(response.status, 201);
+  const value = await response.json();
+  assert.equal(value.protocol, 'lit-shell.v1');
+  assert.equal(value.webSocketPath, '/terminal');
+  assert.match(value.token, /^[A-Za-z0-9_-]{43}$/u);
+  assert.ok(Date.parse(value.resetAt) > Date.now());
+  return value;
 }
 
-async function waitForAvailableReadiness() {
-  const deadline = Date.now() + 7_000;
-  while (Date.now() < deadline) {
+async function spawn(client, requestId) {
+  client.send({
+    options: { allowJoin: false, cols: 80, rows: 24 },
+    requestId,
+    type: 'spawn',
+  });
+  const message = await client.waitFor(
+    (value) => value.requestId === requestId,
+  );
+  assert.equal(message.type, 'spawned');
+  assert.equal(typeof message.sessionId, 'string');
+  return message.sessionId;
+}
+
+async function disableEcho(client, sessionId) {
+  const marker = `echo-disabled-${randomUUID().replaceAll('-', '')}`;
+  const octalMarker = Array.from(
+    Buffer.from(marker, 'utf8'),
+    (byte) => `\\${byte.toString(8).padStart(3, '0')}`,
+  ).join('');
+  client.send({
+    data: `stty -echo; printf '${octalMarker}\\n'\n`,
+    sessionId,
+    type: 'data',
+  });
+  await client.waitForOutput(sessionId, marker, 5_000);
+  client.clearOutput(sessionId);
+}
+
+async function waitForEpoch(epoch) {
+  return waitUntil(async () => {
     const response = await fetch(`${serviceOrigin}/health/ready`);
-    if (response.ok) {
-      const value = await response.clone().json();
-      if (value.admission === 'available') return response;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('The gateway did not become available after sandbox cleanup');
+    if (!response.ok) return undefined;
+    const value = await response.json();
+    return value.epoch === epoch ? value : undefined;
+  }, 8_000);
 }
 
 async function expectUpgradeRejected(
@@ -257,26 +374,18 @@ async function connect(token) {
     }
   });
   await once(socket, 'open');
-
   return {
     socket,
     send(message) {
       socket.send(JSON.stringify(message));
     },
-    async waitFor(predicate, timeout = 3_000) {
+    waitFor(predicate, timeout = 3_000) {
       return waitUntil(() => messages.find(predicate), timeout);
     },
-    async waitForOutput(sessionId, marker, timeout) {
+    waitForOutput(sessionId, marker, timeout) {
       return waitUntil(() => {
         const current = output.get(sessionId) ?? '';
         return current.includes(marker) ? current : undefined;
-      }, timeout);
-    },
-    async waitForOutputOccurrences(sessionId, marker, count, timeout) {
-      return waitUntil(() => {
-        const current = output.get(sessionId) ?? '';
-        const occurrences = current.split(marker).length - 1;
-        return occurrences >= count ? current : undefined;
       }, timeout);
     },
     clearOutput(sessionId) {
@@ -294,7 +403,7 @@ async function connect(token) {
 async function waitUntil(check, timeout) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const value = check();
+    const value = await check();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

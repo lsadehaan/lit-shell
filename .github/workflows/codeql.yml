@@ -33,8 +33,6 @@ jobs:
             build-mode: none
           - language: python
             build-mode: none
-          - language: c-cpp
-            build-mode: manual
 
     steps:
       - name: Check out repository
@@ -47,19 +45,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-
-      - name: Install native sandbox build dependencies
-        if: ${{ matrix.language == 'c-cpp' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential libseccomp-dev
-
-      - name: Build the native sandbox launcher
-        if: ${{ matrix.language == 'c-cpp' }}
-        run: >-
-          sh deploy/remote-shell/build-launcher.sh
-          /tmp/lit-shell-sandbox
 
       - name: Analyze source
         uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4

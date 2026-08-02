@@ -25,11 +25,13 @@ const expectedFiles = [
 const maximumArtifactBytes = 2_500_000;
 const remoteConfig = pagesRemoteConfig(
   process.env.LIT_SHELL_REMOTE_DEMO_ORIGIN,
+  process.env.LIT_SHELL_TURNSTILE_SITE_KEY,
 );
 const remoteCsp =
   `default-src 'none'; base-uri 'none'; connect-src ${remoteConfig.connectSource}; ` +
-  "font-src 'self'; form-action 'none'; img-src 'self' data:; object-src 'none'; " +
-  "script-src 'self'; style-src 'self' 'unsafe-inline'";
+  `font-src 'self'; form-action 'none'; frame-src ${remoteConfig.frameSource}; ` +
+  "img-src 'self' data:; object-src 'none'; " +
+  `script-src ${remoteConfig.scriptSource}; style-src 'self' 'unsafe-inline'`;
 
 const actualFiles = await listFiles(siteRoot);
 assertEqual(
@@ -93,6 +95,7 @@ assert(remoteBuildRevision, 'remote/index.html must expose its build revision');
 for (const required of [
   `content="${remoteCsp}"`,
   `content="${remoteConfig.origin}"`,
+  `content="${remoteConfig.siteKey}"`,
   'src="../assets/remote-demo.js"',
   'href="../style.css"',
   'href="./style.css"',
@@ -114,10 +117,22 @@ if (remoteConfig.enabled) {
     !html.includes(remoteConfig.origin),
     'the safe simulator must not inherit the remote service origin',
   );
+  assert(
+    remoteHtml.includes('frame-src https://challenges.cloudflare.com') &&
+      remoteHtml.includes(
+        "script-src 'self' https://challenges.cloudflare.com",
+      ),
+    'the enabled remote page must allow only the official Turnstile origin',
+  );
 } else {
   assert(
     remoteHtml.includes("connect-src 'none'"),
     'an unconfigured remote page must remain network-disabled',
+  );
+  assert(
+    remoteHtml.includes("frame-src 'none'") &&
+      remoteHtml.includes("script-src 'self'"),
+    'an unconfigured remote page must not allow Turnstile resources',
   );
 }
 
@@ -135,6 +150,7 @@ for (const forbidden of [
   'WebSocketServer',
   'localStorage',
   'sessionStorage',
+  'LIT_SHELL_TURNSTILE_SECRET_KEY',
 ]) {
   assert(
     !remoteBundle.includes(forbidden),

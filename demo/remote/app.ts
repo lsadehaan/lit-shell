@@ -7,14 +7,54 @@ document.documentElement.dataset.remoteBuild =
 
 const applicationProtocol = 'lit-shell.v1';
 const admissionProtocolPrefix = 'lit-shell.admission.';
+const turnstileScriptUrl =
+  'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const turnstileAction = 'remote_shell_admission';
+const turnstileLoadTimeoutMs = 20_000;
 const wakeDeadlineMs = 90_000;
 
 interface AdmissionResponse {
   readonly expiresAt: string;
   readonly protocol: string;
+  readonly resetAt: string;
   readonly sessionLifetimeMs: number;
   readonly token: string;
   readonly webSocketPath: string;
+}
+
+interface TimedAdmissionResponse extends AdmissionResponse {
+  readonly receivedAtMonotonicMs: number;
+}
+
+interface TurnstileScriptState {
+  readonly element: HTMLScriptElement;
+  readonly loaded: Promise<TurnstileApi>;
+}
+
+interface TurnstileApi {
+  remove(widgetId: string): void;
+  render(
+    container: HTMLElement,
+    options: {
+      readonly action: string;
+      readonly appearance: 'always';
+      readonly callback: (token: string) => void;
+      readonly 'error-callback': () => boolean;
+      readonly 'expired-callback': () => void;
+      readonly 'response-field': false;
+      readonly sitekey: string;
+      readonly size: 'flexible';
+      readonly theme: 'auto';
+      readonly 'timeout-callback': () => void;
+      readonly 'unsupported-callback': () => void;
+    },
+  ): string;
+}
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
 }
 
 function requiredElement<T extends Element>(selector: string): T {
@@ -27,12 +67,18 @@ function requiredElement<T extends Element>(selector: string): T {
 const originMeta = requiredElement<HTMLMetaElement>(
   'meta[name="lit-shell-remote-origin"]',
 );
+const siteKeyMeta = requiredElement<HTMLMetaElement>(
+  'meta[name="lit-shell-turnstile-site-key"]',
+);
 const mount = requiredElement<HTMLElement>('[data-remote-mount]');
 const status = requiredElement<HTMLElement>('[data-remote-status]');
 const countdown = requiredElement<HTMLElement>('[data-remote-countdown]');
 const startButton = requiredElement<HTMLButtonElement>('[data-remote-start]');
 const endButton = requiredElement<HTMLButtonElement>('[data-remote-end]');
+const turnstilePanel = requiredElement<HTMLElement>('[data-turnstile-panel]');
+const turnstileMount = requiredElement<HTMLElement>('[data-turnstile-mount]');
 const remoteOrigin = originMeta.content;
+const turnstileSiteKey = siteKeyMeta.content;
 const idleMountNodes = Array.from(mount.childNodes, (node) =>
   node.cloneNode(true),
 );
@@ -40,6 +86,8 @@ const idleMountNodes = Array.from(mount.childNodes, (node) =>
 let activeTerminal: LitShellTerminal | undefined;
 let countdownTimer: ReturnType<typeof setInterval> | undefined;
 let starting = false;
+let turnstileScriptState: TurnstileScriptState | undefined;
+let widgetId: string | undefined;
 
 function updateStatus(
   message: string,
@@ -68,9 +116,9 @@ function webSocketUrl(origin: URL): string {
 }
 
 async function wakeService(origin: URL): Promise<void> {
-  const deadline = Date.now() + wakeDeadlineMs;
+  const deadline = performance.now() + wakeDeadlineMs;
   let lastError: unknown;
-  while (Date.now() < deadline) {
+  while (performance.now() < deadline) {
     try {
       const response = await fetch(new URL('/health/ready', origin), {
         cache: 'no-store',
@@ -95,8 +143,12 @@ async function wakeService(origin: URL): Promise<void> {
   });
 }
 
-async function requestAdmission(origin: URL): Promise<AdmissionResponse> {
+async function requestAdmission(
+  origin: URL,
+  turnstileToken: string,
+): Promise<TimedAdmissionResponse> {
   const response = await fetch(new URL('/v1/admissions', origin), {
+    body: new URLSearchParams({ turnstileToken }),
     cache: 'no-store',
     credentials: 'omit',
     method: 'POST',
@@ -104,29 +156,48 @@ async function requestAdmission(origin: URL): Promise<AdmissionResponse> {
     redirect: 'error',
     referrerPolicy: 'no-referrer',
   });
+  if (response.status === 403) {
+    throw new Error('Human verification was not accepted. Please try again.');
+  }
   if (response.status === 429) {
     const retry = response.headers.get('retry-after');
     throw new Error(
-      `The single demo slot is busy. Try again${retry ? ` in about ${retry} seconds` : ' shortly'}.`,
+      `The tiny shared demo is busy. Try again${retry ? ` in about ${retry} seconds` : ' shortly'}.`,
+    );
+  }
+  if (response.status === 503) {
+    throw new Error(
+      'The shared environment is resetting or verification is temporarily unavailable. Please try again.',
     );
   }
   if (!response.ok) {
     throw new Error(`Admission failed with HTTP ${response.status}`);
   }
-  return validateAdmission(await response.json());
+  return {
+    ...validateAdmission(await response.json()),
+    receivedAtMonotonicMs: performance.now(),
+  };
 }
 
 function validateAdmission(value: unknown): AdmissionResponse {
   if (!isRecord(value)) throw new Error('Admission returned invalid JSON');
-  const { expiresAt, protocol, sessionLifetimeMs, token, webSocketPath } =
-    value;
+  const {
+    expiresAt,
+    protocol,
+    resetAt,
+    sessionLifetimeMs,
+    token,
+    webSocketPath,
+  } = value;
   if (
     typeof expiresAt !== 'string' ||
     Number.isNaN(Date.parse(expiresAt)) ||
+    typeof resetAt !== 'string' ||
+    Number.isNaN(Date.parse(resetAt)) ||
     protocol !== applicationProtocol ||
     !Number.isSafeInteger(sessionLifetimeMs) ||
     (sessionLifetimeMs as number) < 1 ||
-    (sessionLifetimeMs as number) > 65_000 ||
+    (sessionLifetimeMs as number) > 300_000 ||
     typeof token !== 'string' ||
     !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
     webSocketPath !== '/terminal'
@@ -140,13 +211,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function startCountdown(lifetimeMs: number): void {
+function remainingSessionLifetimeMs(admission: TimedAdmissionResponse): number {
+  return Math.max(
+    0,
+    admission.sessionLifetimeMs -
+      (performance.now() - admission.receivedAtMonotonicMs),
+  );
+}
+
+function startCountdown(admission: TimedAdmissionResponse): void {
   if (countdownTimer) clearInterval(countdownTimer);
-  const deadline = Date.now() + lifetimeMs;
   countdown.hidden = false;
   const render = () => {
-    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-    countdown.textContent = `${remaining}s remaining`;
+    const remaining = Math.ceil(remainingSessionLifetimeMs(admission) / 1_000);
+    const minutes = Math.floor(remaining / 60);
+    const seconds = String(remaining % 60).padStart(2, '0');
+    countdown.textContent = `Shared reset in ${String(minutes)}:${seconds}`;
   };
   render();
   countdownTimer = setInterval(render, 250);
@@ -176,7 +256,7 @@ function focusStartButton(): void {
 
 function sessionEnded(
   terminal: LitShellTerminal,
-  message = 'Session ended. You may request a new one.',
+  message = 'Session ended or the shared environment reset. You may start again.',
 ): void {
   if (activeTerminal !== terminal) return;
   releaseTerminal(terminal);
@@ -197,20 +277,137 @@ function sessionFailed(terminal: LitShellTerminal, message: string): void {
   focusStartButton();
 }
 
+function loadTurnstile(): Promise<TurnstileApi> {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (!turnstileScriptState) {
+    turnstileScriptState = createTurnstileScriptState();
+    document.head.append(turnstileScriptState.element);
+  }
+  return waitForTurnstile(turnstileScriptState.loaded);
+}
+
+function createTurnstileScriptState(): TurnstileScriptState {
+  const element = document.createElement('script');
+  element.src = turnstileScriptUrl;
+  element.async = true;
+  element.referrerPolicy = 'no-referrer';
+  const loaded = new Promise<TurnstileApi>((resolve, reject) => {
+    const cleanup = () => {
+      element.removeEventListener('load', onLoad);
+      element.removeEventListener('error', onError);
+    };
+    const onLoad = () => {
+      cleanup();
+      if (!window.turnstile) {
+        discardTurnstileScript(element);
+        reject(new Error('Human verification loaded an invalid response.'));
+        return;
+      }
+      resolve(window.turnstile);
+    };
+    const onError = () => {
+      cleanup();
+      discardTurnstileScript(element);
+      reject(new Error('Human verification could not be loaded.'));
+    };
+    element.addEventListener('load', onLoad);
+    element.addEventListener('error', onError);
+  });
+  return { element, loaded };
+}
+
+function discardTurnstileScript(element: HTMLScriptElement): void {
+  if (turnstileScriptState?.element === element) {
+    turnstileScriptState = undefined;
+  }
+  element.remove();
+}
+
+function waitForTurnstile(
+  loaded: Promise<TurnstileApi>,
+): Promise<TurnstileApi> {
+  return new Promise<TurnstileApi>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Human verification did not load in time.'));
+    }, turnstileLoadTimeoutMs);
+    void loaded.then(
+      (turnstile) => {
+        clearTimeout(timeout);
+        resolve(turnstile);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(
+          error instanceof Error
+            ? error
+            : new Error('Human verification could not be loaded.'),
+        );
+      },
+    );
+  });
+}
+
+async function completeHumanCheck(): Promise<string> {
+  turnstilePanel.hidden = false;
+  const turnstile = await loadTurnstile();
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const succeed = (token: string) => {
+      if (settled) return;
+      settled = true;
+      resolve(token);
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    };
+    widgetId = turnstile.render(turnstileMount, {
+      action: turnstileAction,
+      appearance: 'always',
+      callback: succeed,
+      'error-callback': () => {
+        fail('Human verification failed to run. Please try again.');
+        return true;
+      },
+      'expired-callback': () =>
+        fail('Human verification expired. Please try again.'),
+      'response-field': false,
+      sitekey: turnstileSiteKey,
+      size: 'flexible',
+      theme: 'auto',
+      'timeout-callback': () =>
+        fail('Human verification timed out. Please try again.'),
+      'unsupported-callback': () =>
+        fail('This browser cannot run human verification.'),
+    });
+  });
+}
+
+function removeTurnstile(): void {
+  if (widgetId && window.turnstile) window.turnstile.remove(widgetId);
+  widgetId = undefined;
+  turnstileMount.replaceChildren();
+  turnstilePanel.hidden = true;
+}
+
 async function startRemoteDemo(): Promise<void> {
   if (starting || activeTerminal) return;
   starting = true;
   startButton.disabled = true;
-  updateStatus(
-    'Waking the free service. This can take about a minute…',
-    'loading',
-  );
+  updateStatus('Complete the human check to start the demo…', 'loading');
   try {
     const origin = configuredOrigin();
+    const turnstileToken = await completeHumanCheck();
+    updateStatus(
+      'Verified. Waking the free service; this can take about a minute…',
+      'loading',
+    );
     await wakeService(origin);
-    updateStatus('Requesting the single anonymous demo slot…', 'loading');
-    const admission = await requestAdmission(origin);
-    if (Date.parse(admission.expiresAt) <= Date.now()) {
+    updateStatus('Requesting a place in the shared container…', 'loading');
+    const admission = await requestAdmission(origin, turnstileToken);
+    removeTurnstile();
+    if (remainingSessionLifetimeMs(admission) <= 0) {
       throw new Error('The admission capability expired before use');
     }
 
@@ -225,19 +422,15 @@ async function startRemoteDemo(): Promise<void> {
     terminal.fontSize = 15;
     terminal.noHeader = true;
     terminal.screenReaderMode = true;
-    terminal.setAttribute('aria-label', 'Isolated remote shell terminal');
-    terminal.addEventListener('disconnect', () => {
-      sessionEnded(terminal);
-    });
+    terminal.setAttribute('aria-label', 'Shared remote shell terminal');
+    terminal.addEventListener('disconnect', () => sessionEnded(terminal));
     terminal.addEventListener('exit', () => {
       sessionEnded(
         terminal,
-        'The shell process exited. You may request a new one.',
+        'The shell process exited. You may complete a new check and start again.',
       );
     });
-    terminal.addEventListener('session-closed', () => {
-      sessionEnded(terminal);
-    });
+    terminal.addEventListener('session-closed', () => sessionEnded(terminal));
     terminal.addEventListener('error', (event: Event) => {
       const detail =
         'detail' in event && isRecord(event.detail) ? event.detail : undefined;
@@ -257,9 +450,10 @@ async function startRemoteDemo(): Promise<void> {
       ?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
       ?.setAttribute('aria-label', 'Remote shell terminal input');
     endButton.hidden = false;
-    startCountdown(admission.sessionLifetimeMs);
-    updateStatus('Connected to the isolated remote PTY.', 'ready');
+    startCountdown(admission);
+    updateStatus('Connected to the shared disposable container.', 'ready');
   } catch (error) {
+    removeTurnstile();
     if (activeTerminal) releaseTerminal(activeTerminal);
     else restoreIdleMount();
     startButton.disabled = false;
@@ -282,14 +476,13 @@ endButton.addEventListener('click', () => {
   const terminal = activeTerminal;
   if (!terminal) return;
   endButton.disabled = true;
-  sessionEnded(terminal, 'Session ended by you. You may request a new one.');
+  sessionEnded(terminal, 'Session ended by you. You may start a new one.');
   endButton.disabled = false;
 });
 
 document.addEventListener('securitypolicyviolation', (event) => {
   document.documentElement.dataset.cspViolation = event.violatedDirective;
-  const message =
-    'The browser blocked a resource that violated the demo policy.';
+  const message = 'The browser blocked a resource required by the demo.';
   if (activeTerminal) sessionFailed(activeTerminal, message);
   else updateStatus(message, 'error');
 });
@@ -300,10 +493,10 @@ if (window.top !== window.self) {
     'The real shell demo cannot run inside an embedded frame.',
     'error',
   );
-} else if (!remoteOrigin) {
+} else if (!remoteOrigin || !turnstileSiteKey) {
   startButton.disabled = true;
   updateStatus(
-    'The hardened remote service is not connected yet. The safe simulator remains available.',
+    'The remote service and human verification are not connected yet. The safe simulator remains available.',
     'idle',
   );
 }

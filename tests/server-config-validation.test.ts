@@ -8,6 +8,7 @@ import {
 } from '../src/server/index.js';
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_NODE_PTY_ID = 2_147_483_647;
 const INVALID_INTEGER_VALUES = [
   -1,
   1.5,
@@ -159,6 +160,74 @@ describe('TerminalServer resource-limit configuration', () => {
     });
     server.close();
   });
+
+  it.each([{ localUid: 1000 }, { localGid: 1000 }] as TerminalServerOptions[])(
+    'requires localUid and localGid to be configured together: %j',
+    (options) => {
+      expect(() => new TerminalServer(options)).toThrow(
+        /localUid and localGid must be provided together/,
+      );
+    },
+  );
+
+  it.each([
+    ['localUid', -1],
+    ['localUid', 1.5],
+    ['localUid', Number.NaN],
+    ['localUid', Number.POSITIVE_INFINITY],
+    ['localUid', MAX_NODE_PTY_ID + 1],
+    ['localGid', -1],
+    ['localGid', 1.5],
+    ['localGid', Number.NaN],
+    ['localGid', Number.POSITIVE_INFINITY],
+    ['localGid', MAX_NODE_PTY_ID + 1],
+  ] as const)('rejects invalid POSIX identity %s=%s', (name, value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localUid: name === 'localUid' ? value : 1000,
+          localGid: name === 'localGid' ? value : 1000,
+        }),
+    ).toThrow(new RegExp(name));
+  });
+
+  it.each([
+    ['localUid', '1000'],
+    ['localUid', null],
+    ['localGid', '1000'],
+    ['localGid', null],
+  ] as const)('rejects non-numeric POSIX identity %s=%s', (name, value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localUid: name === 'localUid' ? value : 1000,
+          localGid: name === 'localGid' ? value : 1000,
+        } as unknown as TerminalServerOptions),
+    ).toThrow(new RegExp(name));
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'accepts zero and the largest node-pty POSIX identity',
+    () => {
+      const zero = new TerminalServer({ localUid: 0, localGid: 0 });
+      const largest = new TerminalServer({
+        localUid: MAX_NODE_PTY_ID,
+        localGid: MAX_NODE_PTY_ID,
+      });
+
+      zero.close();
+      largest.close();
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'rejects POSIX identity options on Windows',
+    () => {
+      expect(
+        () => new TerminalServer({ localUid: 1000, localGid: 1000 }),
+      ).toThrow(/not supported on Windows/);
+    },
+  );
 
   it.each(
     POSITIVE_SERVER_LIMITS.flatMap((name) =>

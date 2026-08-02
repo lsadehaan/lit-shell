@@ -9,8 +9,11 @@ import {
 
 const backendOrigin = 'https://remote.example.test';
 const capability = 'a'.repeat(43);
-const remoteCsp = (connectSource: string) =>
-  `default-src 'none'; base-uri 'none'; connect-src ${connectSource}; font-src 'self'; form-action 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'`;
+const turnstileScriptUrl =
+  'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const turnstileToken = 'turnstile-test-token';
+const remoteCsp = (connectSource: string, turnstile: boolean) =>
+  `default-src 'none'; base-uri 'none'; connect-src ${connectSource}; font-src 'self'; form-action 'none'; frame-src ${turnstile ? 'https://challenges.cloudflare.com' : "'none'"}; img-src 'self' data:; object-src 'none'; script-src ${turnstile ? "'self' https://challenges.cloudflare.com" : "'self'"}; style-src 'self' 'unsafe-inline'`;
 
 let disabledFixture: PagesDemoFixture;
 let enabledFixture: PagesDemoFixture;
@@ -56,12 +59,73 @@ test('is inert and network-disabled until a backend origin is configured', async
   const csp = await page
     .locator('meta[http-equiv="Content-Security-Policy"]')
     .getAttribute('content');
-  expect(csp).toBe(remoteCsp("'none'"));
+  expect(csp).toBe(remoteCsp("'none'", false));
   expect(dynamicRequests).toEqual([]);
   expect(webSockets).toEqual([]);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
+});
+
+test('keeps the visible human-verification panel accessible', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  await installTurnstileMock(page, { autoComplete: false });
+
+  await page.goto(enabledFixture.remotePageUrl);
+  await page.getByRole('button', { name: 'Start real demo' }).click();
+
+  await expect(page.locator('[data-turnstile-panel]')).toBeVisible();
+  await expect(
+    page.getByRole('group', { name: 'Human verification' }),
+  ).toBeVisible();
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(accessibility.violations).toEqual([]);
+});
+
+test('reuses one pending Turnstile script when a timed-out load finishes late', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  await page.clock.install();
+  await installAdmissionBackendMock(page);
+  await page.routeWebSocket(
+    `${backendOrigin.replace('https:', 'wss:')}/terminal`,
+    (route) => installProtocolMock(route, []),
+  );
+  let releaseScript: () => void = () => undefined;
+  const scriptMayLoad = new Promise<void>((resolve) => {
+    releaseScript = resolve;
+  });
+  let scriptRequests = 0;
+  await page.route(turnstileScriptUrl, async (route) => {
+    scriptRequests += 1;
+    await scriptMayLoad;
+    await route.fulfill({
+      body: turnstileMockSource(),
+      contentType: 'text/javascript',
+      status: 200,
+    });
+  });
+
+  await page.goto(enabledFixture.remotePageUrl);
+  await page.getByRole('button', { name: 'Start real demo' }).click();
+  await expect.poll(() => scriptRequests).toBe(1);
+  await page.clock.fastForward(20_001);
+  await expect(page.locator('[data-remote-status]')).toContainText(
+    'did not load in time',
+  );
+
+  await page.getByRole('button', { name: 'Start real demo' }).click();
+  await expect.poll(() => scriptRequests).toBe(1);
+  releaseScript();
+
+  await expect(page.locator('[data-remote-status]')).toContainText('Connected');
+  expect(scriptRequests).toBe(1);
+  await expect(page.locator(`script[src="${turnstileScriptUrl}"]`)).toHaveCount(
+    1,
+  );
 });
 
 test('starts only on click and keeps the one-use capability out of URLs and storage', async ({
@@ -73,6 +137,7 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
   const routedWebSocketUrls: string[] = [];
   const routedWebSocketProtocols: string[][] = [];
   const spawnOptions: Record<string, unknown>[] = [];
+  await installTurnstileMock(page);
   await page.route(`${backendOrigin}/**`, async (route) => {
     backendRequests.push(route.request());
     const url = new URL(route.request().url());
@@ -95,7 +160,8 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
         body: JSON.stringify({
           expiresAt: new Date(Date.now() + 30_000).toISOString(),
           protocol: 'lit-shell.v1',
-          sessionLifetimeMs: 60_000,
+          resetAt: new Date(Date.now() + 240_000).toISOString(),
+          sessionLifetimeMs: 240_000,
           token: capability,
           webSocketPath: '/terminal',
         }),
@@ -123,7 +189,7 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
 
   await page.getByRole('button', { name: 'Start real demo' }).click();
   await expect(page.locator('[data-remote-status]')).toContainText(
-    'Connected to the isolated remote PTY.',
+    'Connected to the shared disposable container.',
   );
   await expect(
     page.getByRole('textbox', { name: 'Remote shell terminal input' }),
@@ -133,12 +199,40 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
     backendRequests.map((request) => new URL(request.url()).pathname),
   ).toEqual(['/health/ready', '/v1/admissions']);
   expect(backendRequests[1]?.method()).toBe('POST');
+  expect(backendRequests[1]?.postData()).toBe(
+    `turnstileToken=${turnstileToken}`,
+  );
   expect(routedWebSocketUrls).toEqual(['wss://remote.example.test/terminal']);
   expect(routedWebSocketUrls[0]).not.toContain(capability);
   expect(spawnOptions).toEqual([expect.objectContaining({ allowJoin: false })]);
   expect(routedWebSocketProtocols).toEqual([
     ['lit-shell.v1', `lit-shell.admission.${capability}`],
   ]);
+  expect(routedWebSocketProtocols.flat()).not.toContain(turnstileToken);
+  expect(
+    backendRequests.every(
+      (request) =>
+        !request.url().includes(capability) &&
+        !request.url().includes(turnstileToken),
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __turnstileConfig?: unknown })
+          .__turnstileConfig,
+    ),
+  ).toMatchObject({
+    action: 'remote_shell_admission',
+    sitekey: '1x00000000000000000000AA',
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __turnstileRemoved?: number })
+          .__turnstileRemoved,
+    ),
+  ).toBe(1);
   expect(
     await page.evaluate(() => ({
       local: Object.keys(localStorage),
@@ -152,7 +246,7 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
   await page.keyboard.press('Enter');
   await expect
     .poll(() => terminalText(page))
-    .toContain('uid=65532(demo) gid=65532(demo) groups=');
+    .toContain('uid=65532(guest) gid=65532(guest) groups=65532(guest)');
 
   const connectedAccessibility = await new AxeBuilder({ page }).analyze();
   expect(connectedAccessibility.violations).toEqual([]);
@@ -173,6 +267,77 @@ test('starts only on click and keeps the one-use capability out of URLs and stor
   ).toBeFocused();
   await page.waitForTimeout(250);
   expect(routedWebSocketUrls).toHaveLength(1);
+});
+
+test('uses monotonic session time across extreme browser clock skew', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  await page.clock.setFixedTime('2126-01-01T00:00:00Z');
+  await installAdmissionMock(page, {
+    body: validAdmission({ sessionLifetimeMs: 75_000 }),
+    status: 201,
+  });
+  await page.routeWebSocket(
+    `${backendOrigin.replace('https:', 'wss:')}/terminal`,
+    (route) => installProtocolMock(route, []),
+  );
+
+  await page.goto(enabledFixture.remotePageUrl);
+  await page.getByRole('button', { name: 'Start real demo' }).click();
+
+  await expect(page.locator('[data-remote-status]')).toContainText('Connected');
+  const countdown = page.locator('[data-remote-countdown]');
+  await expect(countdown).toHaveText(/Shared reset in 1:(?:14|15)/u);
+
+  await page.clock.setFixedTime('1970-01-01T00:00:00Z');
+  await page.waitForTimeout(350);
+  await expect(countdown).toHaveText(/Shared reset in 1:(?:14|15)/u);
+});
+
+test('fails closed when the human check fails without contacting the shell backend', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  const backendRequests: string[] = [];
+  const webSockets: string[] = [];
+  await page.route(turnstileScriptUrl, async (route) => {
+    await route.fulfill({
+      body: `
+        window.turnstile = {
+          render(_container, options) {
+            queueMicrotask(() => options['error-callback']());
+            return 'failed-widget';
+          },
+          remove() {}
+        };
+      `,
+      contentType: 'text/javascript',
+      status: 200,
+    });
+  });
+  page.on('request', (request) => {
+    if (request.url().startsWith(backendOrigin)) {
+      backendRequests.push(request.url());
+    }
+  });
+  page.on('websocket', (socket) => webSockets.push(socket.url()));
+
+  await page.goto(enabledFixture.remotePageUrl);
+  await page.getByRole('button', { name: 'Start real demo' }).click();
+
+  await expect(page.locator('[data-remote-status]')).toContainText(
+    'Human verification failed to run',
+  );
+  await expect(page.locator('[data-remote-status]')).toHaveAttribute(
+    'role',
+    'alert',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Start real demo' }),
+  ).toBeEnabled();
+  expect(backendRequests).toEqual([]);
+  expect(webSockets).toEqual([]);
 });
 
 test('releases a sessionClosed-only lease and restores keyboard focus', async ({
@@ -350,17 +515,17 @@ test('disables the real shell when GitHub Pages is embedded by another site', as
 
 for (const invalidAdmission of [
   {
-    name: 'expired',
-    value: { expiresAt: new Date(0).toISOString() },
-    message: 'expired before use',
-  },
-  {
     name: 'malformed',
     value: { token: 'short' },
     message: 'failed validation',
   },
+  {
+    name: 'zero-lifetime',
+    value: { sessionLifetimeMs: 0 },
+    message: 'failed validation',
+  },
 ] as const) {
-  test(`rejects ${invalidAdmission.name === 'expired' ? 'an' : 'a'} ${invalidAdmission.name} admission response before WebSocket use`, async ({
+  test(`rejects a ${invalidAdmission.name} admission response before WebSocket use`, async ({
     page,
     browserErrors: _browserErrors,
   }) => {
@@ -393,7 +558,7 @@ test('has an exact remote CSP and fits a narrow viewport', async ({
     .locator('meta[http-equiv="Content-Security-Policy"]')
     .getAttribute('content');
   expect(csp).toBe(
-    remoteCsp('https://remote.example.test wss://remote.example.test'),
+    remoteCsp('https://remote.example.test wss://remote.example.test', true),
   );
   const width = await page.evaluate(() => ({
     document: document.documentElement.scrollWidth,
@@ -457,8 +622,8 @@ function installProtocolMock(
     JSON.stringify({
       type: 'serverInfo',
       info: {
-        allowedShells: ['/usr/local/bin/lit-shell-sandbox'],
-        defaultShell: '/usr/local/bin/lit-shell-sandbox',
+        allowedShells: ['/usr/local/bin/lit-shell-guest'],
+        defaultShell: '/usr/local/bin/lit-shell-guest',
         dockerEnabled: false,
         localEnabled: true,
       },
@@ -478,7 +643,7 @@ function installProtocolMock(
       socket.send(
         JSON.stringify({
           cols: 80,
-          cwd: '/home/demo',
+          cwd: '/workspace/shared',
           requestId,
           rows: 24,
           sessionId: 'remote-session',
@@ -488,7 +653,7 @@ function installProtocolMock(
       );
       socket.send(
         JSON.stringify({
-          data: 'guest@lit-shell:~$ ',
+          data: 'guest@shared-lit-shell:~$ ',
           sessionId: 'remote-session',
           type: 'data',
         }),
@@ -503,7 +668,7 @@ function installProtocolMock(
       input = '';
       socket.send(
         JSON.stringify({
-          data: 'id\r\nuid=65532(demo) gid=65532(demo) groups=\r\nguest@lit-shell:~$ ',
+          data: 'id\r\nuid=65532(guest) gid=65532(guest) groups=65532(guest)\r\nguest@shared-lit-shell:~$ ',
           sessionId: 'remote-session',
           type: 'data',
         }),
@@ -549,6 +714,14 @@ async function installAdmissionMock(
   page: Page,
   admission: AdmissionMock = { body: validAdmission(), status: 201 },
 ): Promise<void> {
+  await installTurnstileMock(page);
+  await installAdmissionBackendMock(page, admission);
+}
+
+async function installAdmissionBackendMock(
+  page: Page,
+  admission: AdmissionMock = { body: validAdmission(), status: 201 },
+): Promise<void> {
   await page.route(`${backendOrigin}/**`, async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const headers = {
@@ -585,11 +758,43 @@ function validAdmission(
   return {
     expiresAt: new Date(Date.now() + 30_000).toISOString(),
     protocol: 'lit-shell.v1',
-    sessionLifetimeMs: 60_000,
+    resetAt: new Date(Date.now() + 240_000).toISOString(),
+    sessionLifetimeMs: 240_000,
     token: capability,
     webSocketPath: '/terminal',
     ...overrides,
   };
+}
+
+async function installTurnstileMock(
+  page: Page,
+  options: { autoComplete?: boolean } = {},
+): Promise<void> {
+  await page.route(turnstileScriptUrl, async (route) => {
+    await route.fulfill({
+      body: turnstileMockSource(options.autoComplete),
+      contentType: 'text/javascript',
+      status: 200,
+    });
+  });
+}
+
+function turnstileMockSource(autoComplete = true): string {
+  return `
+    window.turnstile = {
+      render(container, options) {
+        window.__turnstileConfig = options;
+        const marker = document.createElement('p');
+        marker.textContent = 'Human check ${autoComplete ? 'complete' : 'pending'}';
+        container.replaceChildren(marker);
+        ${autoComplete ? `queueMicrotask(() => options.callback(${JSON.stringify(turnstileToken)}));` : ''}
+        return 'test-widget';
+      },
+      remove() {
+        window.__turnstileRemoved = (window.__turnstileRemoved || 0) + 1;
+      }
+    };
+  `;
 }
 
 async function terminalText(page: Page): Promise<string> {
