@@ -540,14 +540,13 @@ jobs:
             "$container_name" node /app/remote-demo-container-smoke.mjs
 
       - name: Scan the final image for fixed high-severity vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: lit-shell-remote-demo-ci
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: HIGH,CRITICAL
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+            image --exit-code 1 --ignore-unfixed \
+            --scanners vuln --severity HIGH,CRITICAL \
+            lit-shell-remote-demo-ci
 
       - name: Report and clean up the runtime container
         if: ${{ always() }}
@@ -637,7 +636,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Validate the optional production deployment endpoints
-        id: deployment-config
+        id: deployment_config
         env:
           REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
@@ -671,7 +670,7 @@ jobs:
           echo 'configured=true' >> "$GITHUB_OUTPUT"
 
       - name: Trigger deployment of the exact reviewed revision
-        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        if: ${{ steps.deployment_config.outputs.configured == 'true' }}
         env:
           BUILD_REVISION: ${{ github.sha }}
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
@@ -685,7 +684,7 @@ jobs:
             "${RENDER_DEPLOY_HOOK_URL}${separator}ref=${BUILD_REVISION}"
 
       - name: Wait for the exact backend revision
-        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        if: ${{ steps.deployment_config.outputs.configured == 'true' }}
         env:
           BUILD_REVISION: ${{ github.sha }}
           REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
@@ -707,7 +706,7 @@ jobs:
           done
 
       - name: Exercise the live sandbox boundary and quotas
-        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        if: ${{ steps.deployment_config.outputs.configured == 'true' }}
         env:
           LIT_SHELL_EXPECTED_REVISION: ${{ github.sha }}
           LIT_SHELL_HOST_CANARY: gateway-environment-must-not-cross
