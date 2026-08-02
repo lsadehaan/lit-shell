@@ -22,8 +22,10 @@ export const themeStyles = css`
     --ls-btn-bg: #e5e7eb;
     --ls-btn-text: #374151;
     --ls-btn-hover: #d1d5db;
-    --ls-status-connected: #22c55e;
-    --ls-status-disconnected: #ef4444;
+    --ls-status-connected: #15803d;
+    --ls-status-disconnected: #b91c1c;
+    --ls-primary-bg: #15803d;
+    --ls-danger-bg: #b91c1c;
   }
 
   /* Dark theme (default) */
@@ -32,7 +34,7 @@ export const themeStyles = css`
     --ls-bg: #1e1e1e;
     --ls-bg-header: #2d2d2d;
     --ls-text: #cccccc;
-    --ls-text-muted: #808080;
+    --ls-text-muted: #a3a3a3;
     --ls-border: #3e3e3e;
     --ls-terminal-bg: #1e1e1e;
     --ls-terminal-fg: #cccccc;
@@ -41,8 +43,10 @@ export const themeStyles = css`
     --ls-btn-bg: #3c3c3c;
     --ls-btn-text: #cccccc;
     --ls-btn-hover: #4a4a4a;
-    --ls-status-connected: #22c55e;
-    --ls-status-disconnected: #ef4444;
+    --ls-status-connected: #4ade80;
+    --ls-status-disconnected: #f87171;
+    --ls-primary-bg: #15803d;
+    --ls-danger-bg: #b91c1c;
   }
 
   /* Auto theme - follows system preference */
@@ -50,7 +54,7 @@ export const themeStyles = css`
     --ls-bg: #1e1e1e;
     --ls-bg-header: #2d2d2d;
     --ls-text: #cccccc;
-    --ls-text-muted: #808080;
+    --ls-text-muted: #a3a3a3;
     --ls-border: #3e3e3e;
     --ls-terminal-bg: #1e1e1e;
     --ls-terminal-fg: #cccccc;
@@ -59,8 +63,10 @@ export const themeStyles = css`
     --ls-btn-bg: #3c3c3c;
     --ls-btn-text: #cccccc;
     --ls-btn-hover: #4a4a4a;
-    --ls-status-connected: #22c55e;
-    --ls-status-disconnected: #ef4444;
+    --ls-status-connected: #4ade80;
+    --ls-status-disconnected: #f87171;
+    --ls-primary-bg: #15803d;
+    --ls-danger-bg: #b91c1c;
   }
 
   @media (prefers-color-scheme: light) {
@@ -77,6 +83,10 @@ export const themeStyles = css`
       --ls-btn-bg: #e5e7eb;
       --ls-btn-text: #374151;
       --ls-btn-hover: #d1d5db;
+      --ls-status-connected: #15803d;
+      --ls-status-disconnected: #b91c1c;
+      --ls-primary-bg: #15803d;
+      --ls-danger-bg: #b91c1c;
     }
   }
 `;
@@ -87,8 +97,9 @@ export const themeStyles = css`
 export const sharedStyles = css`
   :host {
     display: block;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-      Ubuntu, Cantarell, sans-serif;
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
+      Cantarell, sans-serif;
     font-size: 14px;
     color: var(--ls-text);
     background: var(--ls-bg);
@@ -128,23 +139,23 @@ export const buttonStyles = css`
 
   button.btn-primary,
   .btn-primary {
-    background: var(--ls-status-connected);
+    background: var(--ls-primary-bg);
     color: #ffffff;
   }
 
   button.btn-primary:hover,
   .btn-primary:hover {
-    background: #16a34a;
+    background: #166534;
   }
 
   button.btn-danger,
   .btn-danger {
-    background: var(--ls-status-disconnected);
+    background: var(--ls-danger-bg);
     color: #ffffff;
   }
 
   button.btn-danger:hover,
   .btn-danger:hover {
-    background: #dc2626;
+    background: #991b1b;
   }
 `;

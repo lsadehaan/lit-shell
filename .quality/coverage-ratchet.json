@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "thresholds": {
+    "branches": 40,
+    "functions": 50,
+    "lines": 51,
+    "statements": 49
+  }
+}

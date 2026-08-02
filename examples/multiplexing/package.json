@@ -1,15 +1,24 @@
 {
   "name": "lit-shell-multiplexing-example",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
   "description": "Example demonstrating lit-shell session multiplexing",
   "scripts": {
-    "start": "node server.js"
+    "deps:build": "npm rebuild --ignore-scripts=false --strict-allow-scripts=true node-pty",
+    "start": "node server.js",
+    "test": "node --test ../shared/http.test.js"
   },
   "dependencies": {
-    "lit-shell.js": "^1.0.0"
+    "lit-shell.js": "file:../..",
+    "node-pty": "1.2.0-beta.14"
   },
-  "devDependencies": {
-    "node-pty": "^1.1.0"
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "allowScripts": {
+    "node-pty@1.2.0-beta.14": true
   }
 }

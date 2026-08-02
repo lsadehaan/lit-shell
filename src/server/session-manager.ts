@@ -9,30 +9,53 @@
  * - Broadcast messages to session clients
  */
 
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+
 import type { WebSocket } from 'ws';
+
 import { CircularBuffer } from './circular-buffer.js';
+import {
+  DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
+  MAX_TIMER_DELAY_MS,
+  resolveOptionalSafeIntegerOption,
+  resolveSafeIntegerOption,
+} from './numeric-limits.js';
+import {
+  canQueueWebSocketMessage,
+  closeForOutputBackpressure,
+} from './websocket-output.js';
+import { secureTokenMatches } from './secure-token.js';
 import type {
   SessionType,
   SharedSessionInfo,
   SessionListFilter,
-  TerminalOptions,
 } from '../shared/types.js';
+
+export interface TerminalProcess {
+  kill(): void;
+  onData(listener: (data: string) => void): unknown;
+  onExit(listener: (event: { exitCode: number }) => void): unknown;
+  resize(cols: number, rows: number): void;
+  write(data: string): void;
+}
 
 /**
  * Session manager configuration
  */
 export interface SessionManagerConfig {
-  /** Maximum clients per session (default: 10) */
+  /** Maximum clients per session (default: 10, minimum: 1) */
   maxClientsPerSession?: number;
-  /** Orphan timeout in ms before killing session (default: 60000) */
+  /** Orphan timeout in ms before killing session (default: 60000, max: 2147483647) */
   orphanTimeout?: number;
-  /** History buffer size in characters (default: 50000) */
+  /** History buffer size in characters (default: 50000, 0 disables retention) */
   historySize?: number;
   /** Enable history by default (default: true) */
   historyEnabled?: boolean;
-  /** Maximum total sessions (default: 100) */
+  /** Maximum total sessions (default: 100, minimum: 1) */
   maxSessionsTotal?: number;
+  /** Maximum queued output per WebSocket client (default: 1048576 bytes) */
+  maxBufferedOutputBytes?: number;
   /** Verbose logging (default: false) */
   verbose?: boolean;
 }
@@ -53,7 +76,7 @@ export interface ClientInfo {
 export interface SharedSession {
   id: string;
   type: SessionType;
-  pty: any; // IPty from node-pty
+  pty: TerminalProcess;
   shell: string;
   cwd: string;
   cols: number;
@@ -69,6 +92,8 @@ export interface SharedSession {
   owner: string;
   label?: string;
   accepting: boolean;
+  /** Secret capability used only by the owner to resume a private session. */
+  resumeToken: string;
 
   // History
   historyBuffer: CircularBuffer;
@@ -76,22 +101,22 @@ export interface SharedSession {
 
   // Orphan handling
   orphanedAt: Date | null;
-  /** Per-session orphan timeout (overrides server default if set) */
+  /** Per-session orphan timeout (overrides server default, max: 2147483647) */
   orphanTimeout?: number;
   /** Whether this session uses tmux (survives orphan indefinitely) */
   useTmux?: boolean;
 }
 
-/**
- * Events emitted by SessionManager
- */
-export interface SessionManagerEvents {
-  sessionCreated: (session: SharedSession) => void;
-  sessionClosed: (sessionId: string, reason: string) => void;
-  clientJoined: (sessionId: string, clientId: string, clientCount: number) => void;
-  clientLeft: (sessionId: string, clientId: string, clientCount: number) => void;
-  sessionOrphaned: (sessionId: string) => void;
-  error: (error: Error, context: string) => void;
+function canJoinSession(session: SharedSession, ownerResume: boolean): boolean {
+  return session.accepting || ownerResume;
+}
+
+function restoreOwner(
+  session: SharedSession,
+  clientId: string,
+  ownerResume: boolean,
+): void {
+  if (ownerResume) session.owner = clientId;
 }
 
 export class SessionManager extends EventEmitter {
@@ -103,16 +128,46 @@ export class SessionManager extends EventEmitter {
   constructor(config: SessionManagerConfig = {}) {
     super();
     this.config = {
-      maxClientsPerSession: config.maxClientsPerSession ?? 10,
-      orphanTimeout: config.orphanTimeout ?? 60000,
-      historySize: config.historySize ?? 50000,
+      maxClientsPerSession: resolveSafeIntegerOption(
+        config.maxClientsPerSession,
+        10,
+        'maxClientsPerSession',
+        1,
+      ),
+      orphanTimeout: resolveSafeIntegerOption(
+        config.orphanTimeout,
+        60_000,
+        'orphanTimeout',
+        0,
+        MAX_TIMER_DELAY_MS,
+      ),
+      historySize: resolveSafeIntegerOption(
+        config.historySize,
+        50_000,
+        'historySize',
+        0,
+      ),
       historyEnabled: config.historyEnabled ?? true,
-      maxSessionsTotal: config.maxSessionsTotal ?? 100,
+      maxSessionsTotal: resolveSafeIntegerOption(
+        config.maxSessionsTotal,
+        100,
+        'maxSessionsTotal',
+        1,
+      ),
+      maxBufferedOutputBytes: resolveSafeIntegerOption(
+        config.maxBufferedOutputBytes,
+        DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
+        'maxBufferedOutputBytes',
+        1,
+      ),
       verbose: config.verbose ?? false,
     };
   }
 
-  private log(message: string, level: 'info' | 'warn' | 'error' = 'info'): void {
+  private log(
+    message: string,
+    level: 'info' | 'warn' | 'error' = 'info',
+  ): void {
     if (this.config.verbose || level === 'error') {
       const prefix = `[SessionManager]`;
       if (level === 'error') {
@@ -135,7 +190,7 @@ export class SessionManager extends EventEmitter {
   createSession(options: {
     id: string;
     type: SessionType;
-    pty: any;
+    pty: TerminalProcess;
     shell: string;
     cwd: string;
     cols: number;
@@ -149,8 +204,17 @@ export class SessionManager extends EventEmitter {
     orphanTimeout?: number;
     useTmux?: boolean;
   }): SharedSession {
+    const orphanTimeout = resolveOptionalSafeIntegerOption(
+      options.orphanTimeout,
+      'orphanTimeout',
+      0,
+      MAX_TIMER_DELAY_MS,
+    );
     if (this.sessions.size >= this.config.maxSessionsTotal) {
       throw new Error('Maximum number of sessions reached');
+    }
+    if (this.sessions.has(options.id)) {
+      throw new Error(`Session already exists: ${options.id}`);
     }
 
     const now = new Date();
@@ -169,11 +233,13 @@ export class SessionManager extends EventEmitter {
       clients: new Map(),
       owner: options.ownerId,
       label: options.label,
-      accepting: options.allowJoin !== false,
+      accepting: options.allowJoin === true,
+      resumeToken: randomUUID(),
       historyBuffer: new CircularBuffer(this.config.historySize),
-      historyEnabled: options.enableHistory !== false && this.config.historyEnabled,
+      historyEnabled:
+        options.enableHistory !== false && this.config.historyEnabled,
       orphanedAt: null,
-      orphanTimeout: options.orphanTimeout,
+      orphanTimeout,
       useTmux: options.useTmux,
     };
 
@@ -189,7 +255,9 @@ export class SessionManager extends EventEmitter {
     this.trackClientSession(options.ownerId, session.id);
 
     this.sessions.set(session.id, session);
-    this.log(`Created session ${session.id} (type: ${session.type}, owner: ${options.ownerId})`);
+    this.log(
+      `Created session ${session.id} (type: ${session.type}, owner: ${options.ownerId})`,
+    );
     this.emit('sessionCreated', session);
 
     return session;
@@ -235,13 +303,6 @@ export class SessionManager extends EventEmitter {
     // Clear orphan timer if any
     this.clearOrphanTimer(sessionId);
 
-    // Kill PTY
-    try {
-      session.pty.kill();
-    } catch (e) {
-      this.log(`Error killing PTY for session ${sessionId}: ${e}`, 'warn');
-    }
-
     // Remove session from all client mappings
     for (const clientId of session.clients.keys()) {
       const clientSessions = this.clientToSessions.get(clientId);
@@ -253,8 +314,19 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    // Remove session
+    // Remove the session before killing its PTY. Some PTY implementations can
+    // emit exit synchronously; deletion first keeps close idempotent.
     this.sessions.delete(sessionId);
+
+    try {
+      session.pty.kill();
+    } catch (error) {
+      this.log(
+        `Error killing PTY for session ${sessionId}: ${String(error)}`,
+        'warn',
+      );
+    }
+
     this.emit('sessionClosed', sessionId, reason);
   }
 
@@ -272,6 +344,15 @@ export class SessionManager extends EventEmitter {
     return this.sessions.size;
   }
 
+  /**
+   * Whether a new session can be registered without exceeding the global cap.
+   * Call immediately before spawning a PTY; JavaScript's run-to-completion
+   * semantics keep the synchronous check/spawn/register sequence atomic.
+   */
+  canCreateSession(): boolean {
+    return this.sessions.size < this.config.maxSessionsTotal;
+  }
+
   // ==========================================================================
   // Client Management
   // ==========================================================================
@@ -279,14 +360,23 @@ export class SessionManager extends EventEmitter {
   /**
    * Add a client to a session.
    */
-  addClient(sessionId: string, clientId: string, ws: WebSocket): boolean {
+  addClient(
+    sessionId: string,
+    clientId: string,
+    ws: WebSocket,
+    resumeToken?: string,
+  ): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      this.log(`Cannot add client to non-existent session ${sessionId}`, 'warn');
+      this.log(
+        `Cannot add client to non-existent session ${sessionId}`,
+        'warn',
+      );
       return false;
     }
 
-    if (!session.accepting) {
+    const ownerResume = secureTokenMatches(resumeToken, session.resumeToken);
+    if (!canJoinSession(session, ownerResume)) {
       this.log(`Session ${sessionId} is not accepting new clients`, 'warn');
       return false;
     }
@@ -310,10 +400,13 @@ export class SessionManager extends EventEmitter {
       joinedAt: now,
       lastActivity: now,
     });
+    restoreOwner(session, clientId, ownerResume);
 
     this.trackClientSession(clientId, sessionId);
 
-    this.log(`Client ${clientId} joined session ${sessionId} (${session.clients.size} clients)`);
+    this.log(
+      `Client ${clientId} joined session ${sessionId} (${session.clients.size} clients)`,
+    );
     this.emit('clientJoined', sessionId, clientId, session.clients.size);
 
     return true;
@@ -339,7 +432,9 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    this.log(`Client ${clientId} left session ${sessionId} (${session.clients.size} clients remaining)`);
+    this.log(
+      `Client ${clientId} left session ${sessionId} (${session.clients.size} clients remaining)`,
+    );
     this.emit('clientLeft', sessionId, clientId, session.clients.size);
 
     // Check if session is now orphaned
@@ -414,24 +509,60 @@ export class SessionManager extends EventEmitter {
   broadcastToSession(
     sessionId: string,
     message: object,
-    excludeClientId?: string
+    excludeClientId?: string,
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
-    const messageStr = JSON.stringify(message);
+    const serialized = JSON.stringify(message);
+    const messageBytes = Buffer.byteLength(serialized);
 
     for (const [clientId, client] of session.clients) {
       if (clientId === excludeClientId) continue;
+      this.sendSerializedToClient(clientId, client, serialized, messageBytes);
+    }
+  }
 
+  private sendSerializedToClient(
+    clientId: string,
+    client: ClientInfo,
+    serialized: string,
+    messageBytes: number,
+  ): boolean {
+    if (client.ws.readyState !== 1) return false; // WebSocket.OPEN
+
+    if (
+      !canQueueWebSocketMessage(
+        client.ws,
+        messageBytes,
+        this.config.maxBufferedOutputBytes,
+      )
+    ) {
+      this.log(
+        `Disconnecting slow client ${clientId}: output buffer limit exceeded`,
+        'warn',
+      );
+      this.removeClientFromAllSessions(clientId);
       try {
-        if (client.ws.readyState === 1) {
-          // WebSocket.OPEN
-          client.ws.send(messageStr);
-        }
-      } catch (e) {
-        this.log(`Error broadcasting to client ${clientId}: ${e}`, 'warn');
+        closeForOutputBackpressure(client.ws);
+      } catch (error) {
+        this.log(
+          `Error closing slow client ${clientId}: ${String(error)}`,
+          'warn',
+        );
       }
+      return false;
+    }
+
+    try {
+      client.ws.send(serialized);
+      return true;
+    } catch (error) {
+      this.log(
+        `Error broadcasting to client ${clientId}: ${String(error)}`,
+        'warn',
+      );
+      return false;
     }
   }
 
@@ -445,16 +576,13 @@ export class SessionManager extends EventEmitter {
     const client = session.clients.get(clientId);
     if (!client) return false;
 
-    try {
-      if (client.ws.readyState === 1) {
-        client.ws.send(JSON.stringify(message));
-        return true;
-      }
-    } catch (e) {
-      this.log(`Error sending to client ${clientId}: ${e}`, 'warn');
-    }
-
-    return false;
+    const serialized = JSON.stringify(message);
+    return this.sendSerializedToClient(
+      clientId,
+      client,
+      serialized,
+      Buffer.byteLength(serialized),
+    );
   }
 
   // ==========================================================================
@@ -527,7 +655,9 @@ export class SessionManager extends EventEmitter {
 
     // tmux sessions persist indefinitely - don't close them on orphan
     if (session.useTmux) {
-      this.log(`Session ${session.id} is orphaned but uses tmux - keeping alive indefinitely`);
+      this.log(
+        `Session ${session.id} is orphaned but uses tmux - keeping alive indefinitely`,
+      );
       this.emit('sessionOrphaned', session.id);
       return;
     }

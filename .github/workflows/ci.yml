@@ -2,52 +2,508 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test on Node.js ${{ matrix.node-version }}
+  node-compatibility:
+    name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        node: ['22.13.0', 24, 26]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-    - name: Setup Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
 
-    - name: Run build
-      run: npm run build
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
 
-    - name: Run tests
-      run: npm test
+      - name: Type-check
+        run: npm run typecheck
 
-  lint:
-    name: Lint and Type Check
+      - name: Build package
+        run: npm run build
+
+      - name: Run unit and protocol tests
+        run: npm test
+
+      - name: Run example HTTP boundary tests
+        run: npm run test:examples
+
+  os-compatibility:
+    name: Node 24 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
+
+      - name: Type-check and build
+        run: npm run typecheck && npm run build
+
+      - name: Run portable unit tests
+        run: npm run test:unit
+
+      - name: Spawn the platform PTY
+        run: npm run test:pty-smoke
+
+  quality:
+    name: Coverage, CRAP, and static quality
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20.x'
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
 
-    - name: Type check
-      run: npm run build
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint code
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Check synchronized public versions
+        run: npm run version:check
+
+      - name: Lint documentation
+        run: npm run docs:lint
+
+      - name: Find unused code and dependencies
+        run: npm run deps:check
+
+      - name: Enforce monotonic quality baselines
+        env:
+          QUALITY_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: npm run test:quality-policy && npm run quality:policy
+
+      - name: Run coverage suite
+        run: npm run test:coverage
+
+      - name: Generate CRAP report
+        run: npm run crap:report
+
+      - name: Enforce CRAP ratchet
+        run: npm run crap:ratchet
+
+      - name: Upload coverage and CRAP reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quality-reports
+          path: |
+            coverage/
+            reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  browser-e2e:
+    name: Browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
+
+      - name: Build browser and server artifacts
+        run: npm run build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run black-box browser tests
+        run: npm run test:e2e:browser
+
+      - name: Upload Playwright report and traces
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  python-contract:
+    name: Python ${{ matrix.python }} contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.11', '3.13', '3.14']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: bindings/python/pyproject.toml
+
+      - name: Install Python binding and test tools
+        working-directory: bindings/python
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+
+      - name: Run deterministic Python contract tests
+        working-directory: bindings/python
+        run: >-
+          python -m pytest -m 'not node_e2e'
+          --junitxml=pytest-${{ matrix.python }}.xml
+
+      - name: Enforce Python static quality and branch coverage
+        if: ${{ matrix.python == '3.14' }}
+        working-directory: bindings/python
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m mypy
+          python -m pytest -m 'not node_e2e' \
+            --cov=lit_shell --cov-branch \
+            --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Audit Python runtime dependencies
+        working-directory: bindings/python
+        run: python -m pip_audit .
+
+      - name: Upload Python test report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-${{ matrix.python }}
+          path: |
+            bindings/python/pytest-${{ matrix.python }}.xml
+            bindings/python/coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  python-node-e2e:
+    name: Python ↔ Node E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: bindings/python/pyproject.toml
+
+      - name: Install and build Node package
+        run: npm ci --ignore-scripts && npm run deps:build && npm run build
+
+      - name: Install Python binding and test tools
+        working-directory: bindings/python
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+
+      - name: Run Python against the real Node server and PTY
+        working-directory: bindings/python
+        run: python -m pytest -m node_e2e --junitxml=pytest-node-e2e.xml
+
+      - name: Upload Python E2E report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-node-e2e
+          path: bindings/python/pytest-node-e2e.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-integrity:
+    name: Package and dependency integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Verify dependency install-script policy
+        run: npm run deps:scripts:check
+
+      - name: Validate package exports and types
+        run: npm run package:check
+
+      - name: Install and audit independent examples
+        run: |
+          npm ci --prefix examples/docker-container --install-links --ignore-scripts
+          npm run --prefix examples/docker-container deps:build
+          npm audit --prefix examples/docker-container --audit-level=high
+          npm ci --prefix examples/multiplexing --install-links --ignore-scripts
+          npm run --prefix examples/multiplexing deps:build
+          npm audit --prefix examples/multiplexing --audit-level=high
+
+      - name: Smoke-test the multiplexing example boundary
+        run: npm run test:example-server
+
+      - name: Create package artifact, checksum, and SBOM
+        run: |
+          mkdir -p package-artifact
+          npm pack --pack-destination package-artifact
+          npm sbom --omit=dev --sbom-format cyclonedx > package-artifact/sbom.cdx.json
+          (cd package-artifact && sha256sum *.tgz > SHA256SUMS)
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: package-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+  container-integrity:
+    name: Container build and runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Validate Dockerfile
+        run: docker build --check --file docker/Dockerfile .
+
+      - name: Validate Compose model
+        env:
+          DOCKER_GID: '999'
+        run: docker compose --file docker/docker-compose.yml config --quiet
+
+      - name: Build production image
+        run: docker build --file docker/Dockerfile --tag lit-shell-ci .
+
+      - name: Verify non-root PTY runtime and health check
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' lit-shell-ci)" = 'node'
+          test "$(docker run --rm lit-shell-ci id -u)" = '1000'
+          docker run --rm lit-shell-ci node --input-type=module --eval \
+            "const pty = (await import('node-pty')).default;
+            const terminal = pty.spawn('/bin/sh', ['-c', 'printf container-pty-ok']);
+            terminal.onData((data) => process.stdout.write(data));
+            terminal.onExit(({ exitCode }) => { process.exitCode = exitCode; });"
+
+          container_id="$(docker run --detach \
+            --health-interval=1s --health-start-period=1s lit-shell-ci)"
+          trap 'docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+            if [ "$health" = 'healthy' ]; then
+              exit 0
+            fi
+            if [ "$health" = 'unhealthy' ]; then
+              break
+            fi
+            sleep 1
+          done
+          docker logs "$container_id"
+          exit 1
+
+      - name: Exercise Docker listing and exec over the public protocol
+        run: |
+          server_name='lit-shell-ci-server'
+          target_name='test-lit-shell-ci'
+          cleanup() {
+            docker rm --force "$server_name" "$target_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$target_name" \
+            --user 65534:65534 --read-only --tmpfs /tmp:mode=1777,size=8m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            lit-shell-ci sleep infinity
+
+          socket_gid="$(stat --format '%g' /var/run/docker.sock)"
+          docker run --detach --name "$server_name" \
+            --group-add "$socket_gid" --read-only \
+            --tmpfs /tmp:mode=1777,size=32m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+            --volume "$PWD/tests/fixtures/docker-protocol-smoke.mjs:/app/tests/docker-protocol-smoke.mjs:ro" \
+            --env LIT_SHELL_ALLOWED_ORIGINS=http://127.0.0.1:3000 \
+            lit-shell-ci
+
+          for attempt in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$server_name")"
+            if [ "$health" = 'healthy' ]; then
+              break
+            fi
+            if [ "$health" = 'unhealthy' ] || [ "$attempt" = '30' ]; then
+              docker logs "$server_name"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          docker exec \
+            --env LIT_SHELL_SMOKE_URL=ws://127.0.0.1:3000/terminal \
+            --env LIT_SHELL_SMOKE_ORIGIN=http://127.0.0.1:3000 \
+            --env LIT_SHELL_SMOKE_CONTAINER="$target_name" \
+            "$server_name" node tests/docker-protocol-smoke.mjs
+
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - node-compatibility
+      - os-compatibility
+      - quality
+      - browser-e2e
+      - python-contract
+      - python-node-e2e
+      - package-integrity
+      - container-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          NODE_COMPATIBILITY_RESULT: ${{ needs['node-compatibility'].result }}
+          OS_COMPATIBILITY_RESULT: ${{ needs['os-compatibility'].result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          BROWSER_E2E_RESULT: ${{ needs['browser-e2e'].result }}
+          PYTHON_CONTRACT_RESULT: ${{ needs['python-contract'].result }}
+          PYTHON_NODE_E2E_RESULT: ${{ needs['python-node-e2e'].result }}
+          PACKAGE_INTEGRITY_RESULT: ${{ needs['package-integrity'].result }}
+          CONTAINER_INTEGRITY_RESULT: ${{ needs['container-integrity'].result }}
+        run: |
+          results=(
+            "node-compatibility=$NODE_COMPATIBILITY_RESULT"
+            "os-compatibility=$OS_COMPATIBILITY_RESULT"
+            "quality=$QUALITY_RESULT"
+            "browser-e2e=$BROWSER_E2E_RESULT"
+            "python-contract=$PYTHON_CONTRACT_RESULT"
+            "python-node-e2e=$PYTHON_NODE_E2E_RESULT"
+            "package-integrity=$PACKAGE_INTEGRITY_RESULT"
+            "container-integrity=$CONTAINER_INTEGRITY_RESULT"
+          )
+          gate_failed=0
+          for entry in "${results[@]}"; do
+            job_name="${entry%%=*}"
+            job_result="${entry#*=}"
+            echo "$job_name: $job_result"
+            if [ "$job_result" != 'success' ]; then
+              gate_failed=1
+            fi
+          done
+          exit "$gate_failed"

@@ -20,6 +20,19 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+playwright-report/
+test-results/
+reports/
+
+# Python test artifacts
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+bindings/python/.coverage
+bindings/python/coverage.xml
+bindings/python/*.egg-info/
+bindings/python/build/
 
 # Environment
 .env
@@ -27,3 +40,6 @@ coverage/
 
 # Cloud Code files (should not be tracked)
 .cloud-code/
+
+# Contributor-local Claude Code permissions
+.claude/settings.local.json

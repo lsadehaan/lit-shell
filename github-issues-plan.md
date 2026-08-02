@@ -1,5 +1,10 @@
 # GitHub Issues Plan: lit-shell.js Roadmap
 
+> [!IMPORTANT]
+> This is a historical January 2026 planning artifact. Many items below are
+> complete or intentionally superseded. Use [roadmap.md](roadmap.md) and the
+> repository's issue forms for current proposals; do not file this list as-is.
+
 **Generated:** January 11, 2026
 **Based on:** roadmap.md version tracking
 **Purpose:** Break down roadmap items into actionable GitHub Issues

@@ -15,60 +15,49 @@
  * ```
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { FitAddon } from '@xterm/addon-fit';
+import { Terminal, type ITheme } from '@xterm/xterm';
+import {
+  LitElement,
+  html,
+  css,
+  nothing,
+  unsafeCSS,
+  type TemplateResult,
+} from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { sharedStyles, buttonStyles, themeStyles } from './styles.js';
 import { TerminalClient } from '../client/terminal-client.js';
 import { VERSION } from '../version.js';
-import type { TerminalOptions, SessionInfo, ContainerInfo, ServerInfo, SharedSessionInfo } from '../shared/types.js';
-
-// xterm.js types (loaded dynamically)
-interface ITerminalOptions {
-  theme?: {
-    background?: string;
-    foreground?: string;
-    cursor?: string;
-    cursorAccent?: string;
-    selection?: string;
-    selectionForeground?: string;
-  };
-  fontSize?: number;
-  fontFamily?: string;
-  cursorBlink?: boolean;
-}
-
-interface ITerminal {
-  open(parent: HTMLElement): void;
-  write(data: string): void;
-  writeln(data: string): void;
-  clear(): void;
-  focus(): void;
-  dispose(): void;
-  onData(handler: (data: string) => void): { dispose(): void };
-  onResize(handler: (size: { cols: number; rows: number }) => void): { dispose(): void };
-  loadAddon(addon: any): void;
-  cols: number;
-  rows: number;
-  options: ITerminalOptions;
-}
-
-interface IFitAddon {
-  fit(): void;
-  proposeDimensions(): { cols: number; rows: number } | undefined;
-}
+import { xtermStyles } from './xterm-styles.generated.js';
+import type {
+  TerminalOptions,
+  SessionInfo,
+  ContainerInfo,
+  ServerInfo,
+  SharedSessionInfo,
+} from '../shared/types.js';
 
 // Tab interface for multi-tab support
 interface Tab {
   id: string;
   label: string;
   client: TerminalClient | null;
-  terminal: ITerminal | null;
-  fitAddon: IFitAddon | null;
+  terminal: Terminal | null;
+  fitAddon: FitAddon | null;
   connected: boolean;
   sessionActive: boolean;
   sessionInfo: SessionInfo | null;
   clientCount: number;
   containerEl: HTMLElement | null;
+}
+
+function firstNonEmptyString(
+  preferred: string | undefined,
+  fallback: string | undefined,
+): string | undefined {
+  return preferred || fallback || undefined;
 }
 
 @customElement('lit-shell-terminal')
@@ -77,6 +66,7 @@ export class LitShellTerminal extends LitElement {
   static readonly VERSION = VERSION;
 
   static override styles = [
+    unsafeCSS(xtermStyles),
     sharedStyles,
     themeStyles,
     buttonStyles,
@@ -88,6 +78,15 @@ export class LitShellTerminal extends LitElement {
         min-height: 200px;
         border: 1px solid var(--ls-border);
         border-radius: 4px;
+        overflow: hidden;
+      }
+
+      .shell {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        min-height: inherit;
         overflow: hidden;
       }
 
@@ -133,7 +132,7 @@ export class LitShellTerminal extends LitElement {
 
       .terminal-container {
         flex: 1;
-        padding: 4px;
+        position: relative;
         background: var(--ls-terminal-bg);
         overflow: hidden;
       }
@@ -148,6 +147,9 @@ export class LitShellTerminal extends LitElement {
 
       .loading,
       .error {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -245,7 +247,7 @@ export class LitShellTerminal extends LitElement {
         background: var(--ls-bg-header);
         border: 1px solid var(--ls-border);
         border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
         z-index: 100;
         padding: 8px 0;
       }
@@ -325,6 +327,12 @@ export class LitShellTerminal extends LitElement {
         overflow-x: auto;
       }
 
+      .tab-list {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+
       .tab-bar::-webkit-scrollbar {
         height: 4px;
       }
@@ -387,7 +395,8 @@ export class LitShellTerminal extends LitElement {
         transition: opacity 0.15s ease;
       }
 
-      .tab:hover .tab-close {
+      .tab-bar:hover .tab-close,
+      .tab-close:focus-visible {
         opacity: 1;
       }
 
@@ -429,7 +438,6 @@ export class LitShellTerminal extends LitElement {
         left: 0;
         right: 0;
         bottom: 0;
-        padding: 4px;
         background: var(--ls-terminal-bg);
         display: none;
       }
@@ -440,6 +448,11 @@ export class LitShellTerminal extends LitElement {
 
       .tab-terminal-container .xterm {
         height: 100%;
+      }
+
+      .xterm-mount {
+        position: absolute;
+        inset: 4px;
       }
 
       /* Reconnect dialog */
@@ -601,7 +614,9 @@ export class LitShellTerminal extends LitElement {
         overflow: hidden;
         max-height: 0;
         opacity: 0;
-        transition: max-height 0.2s ease, opacity 0.2s ease;
+        transition:
+          max-height 0.2s ease,
+          opacity 0.2s ease;
       }
 
       .touch-keyboard-extra.expanded {
@@ -623,10 +638,12 @@ export class LitShellTerminal extends LitElement {
   @property({ type: String }) cwd = '';
   @property({ type: Number }) cols = 80;
   @property({ type: Number }) rows = 24;
-  @property({ type: String, reflect: true }) theme: 'dark' | 'light' | 'auto' = 'dark';
+  @property({ type: String, reflect: true }) theme: 'dark' | 'light' | 'auto' =
+    'dark';
   @property({ type: Boolean, attribute: 'no-header' }) noHeader = false;
   @property({ type: Boolean, attribute: 'auto-connect' }) autoConnect = false;
   @property({ type: Boolean, attribute: 'auto-spawn' }) autoSpawn = false;
+  @property({ type: Boolean, attribute: 'allow-join' }) allowJoin = false;
 
   // Docker container properties
   @property({ type: String }) container = '';
@@ -635,9 +652,11 @@ export class LitShellTerminal extends LitElement {
   @property({ type: String, attribute: 'container-cwd' }) containerCwd = '';
 
   // UI panel options
-  @property({ type: Boolean, attribute: 'show-connection-panel' }) showConnectionPanel = false;
+  @property({ type: Boolean, attribute: 'show-connection-panel' })
+  showConnectionPanel = false;
   @property({ type: Boolean, attribute: 'show-settings' }) showSettings = false;
-  @property({ type: Boolean, attribute: 'show-status-bar' }) showStatusBar = false;
+  @property({ type: Boolean, attribute: 'show-status-bar' }) showStatusBar =
+    false;
   @property({ type: Boolean, attribute: 'show-tabs' }) showTabs = false;
 
   // Terminal appearance
@@ -647,8 +666,8 @@ export class LitShellTerminal extends LitElement {
 
   // State
   @state() private client: TerminalClient | null = null;
-  @state() private terminal: ITerminal | null = null;
-  @state() private fitAddon: IFitAddon | null = null;
+  @state() private terminal: Terminal | null = null;
+  @state() private fitAddon: FitAddon | null = null;
   @state() private connected = false;
   @state() private sessionActive = false;
   @state() private loading = false;
@@ -660,7 +679,8 @@ export class LitShellTerminal extends LitElement {
   @state() private serverInfo: ServerInfo | null = null;
   @state() private selectedContainer = '';
   @state() private selectedShell = '/bin/sh';
-  @state() private connectionMode: 'local' | 'docker' | 'docker-attach' | 'join' = 'local';
+  @state() private connectionMode:
+    'local' | 'docker' | 'docker-attach' | 'join' = 'local';
 
   // Persistence options
   @state() private orphanTimeout = 3600000; // 1 hour default
@@ -692,10 +712,16 @@ export class LitShellTerminal extends LitElement {
   @state() private activeTabId = '';
   private tabCounter = 0;
 
-  // xterm.js module (loaded dynamically)
-  private xtermModule: any = null;
-  private fitAddonModule: any = null;
   private resizeObserver: ResizeObserver | null = null;
+  private mobileMediaQuery: MediaQueryList | null = null;
+  private readonly mobileMediaQueryHandler = (
+    event: MediaQueryListEvent,
+  ): void => {
+    if (navigator.maxTouchPoints > 0) {
+      this.isMobile = event.matches;
+      this.updateMobileAttribute();
+    }
+  };
 
   override connectedCallback() {
     super.connectedCallback();
@@ -712,7 +738,9 @@ export class LitShellTerminal extends LitElement {
     }
 
     if (this.autoConnect && this.url) {
-      this.connect();
+      void this.connect().catch(() => {
+        // connect() exposes failure through component state for declarative use.
+      });
     }
   }
 
@@ -724,23 +752,27 @@ export class LitShellTerminal extends LitElement {
     const hasTouch = navigator.maxTouchPoints > 0;
 
     // Check for mobile-sized viewport
-    const isMobileWidth = window.matchMedia('(max-width: 768px)').matches;
+    this.mobileMediaQuery?.removeEventListener(
+      'change',
+      this.mobileMediaQueryHandler,
+    );
+    this.mobileMediaQuery = window.matchMedia('(max-width: 768px)');
+    const isMobileWidth = this.mobileMediaQuery.matches;
 
     // Check for mobile user agent (backup detection)
-    const mobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-      navigator.userAgent
-    );
+    const mobileUA =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        navigator.userAgent,
+      );
 
     this.isMobile = hasTouch && (isMobileWidth || mobileUA);
     this.updateMobileAttribute();
 
     // Listen for viewport changes
-    window.matchMedia('(max-width: 768px)').addEventListener('change', (e) => {
-      if (navigator.maxTouchPoints > 0) {
-        this.isMobile = e.matches;
-        this.updateMobileAttribute();
-      }
-    });
+    this.mobileMediaQuery.addEventListener(
+      'change',
+      this.mobileMediaQueryHandler,
+    );
   }
 
   /**
@@ -760,63 +792,16 @@ export class LitShellTerminal extends LitElement {
   }
 
   /**
-   * Load xterm.js dynamically
-   */
-  private async loadXterm(): Promise<void> {
-    if (this.xtermModule) return;
-
-    try {
-      // Try to import from CDN
-      // @ts-ignore - Dynamic import from CDN
-      this.xtermModule = await import('https://cdn.jsdelivr.net/npm/xterm@5.3.0/+esm');
-      // @ts-ignore - Dynamic import from CDN
-      this.fitAddonModule = await import('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/+esm');
-    } catch (e) {
-      // Fallback to npm package if available
-      try {
-        // @ts-ignore - Optional peer dependency
-        this.xtermModule = await import('xterm');
-        // @ts-ignore - Optional peer dependency
-        this.fitAddonModule = await import('xterm-addon-fit');
-      } catch {
-        throw new Error('Failed to load xterm.js. Make sure it is available.');
-      }
-    }
-
-    // Inject xterm CSS into shadow DOM (required because CSS doesn't cross shadow boundaries)
-    await this.injectXtermCSS();
-  }
-
-  /**
-   * Inject xterm.js CSS into shadow DOM
-   */
-  private async injectXtermCSS(): Promise<void> {
-    if (!this.shadowRoot) return;
-
-    // Check if already injected
-    if (this.shadowRoot.querySelector('#xterm-styles')) return;
-
-    try {
-      // Fetch xterm CSS from CDN
-      const response = await fetch('https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css');
-      const css = await response.text();
-
-      // Create style element and inject into shadow DOM
-      const style = document.createElement('style');
-      style.id = 'xterm-styles';
-      style.textContent = css;
-      this.shadowRoot.prepend(style);
-    } catch (e) {
-      console.warn('[lit-shell] Failed to load xterm CSS:', e);
-    }
-  }
-
-  /**
    * Connect to the terminal server
    */
   async connect(): Promise<void> {
     if (!this.url) {
       this.error = 'No URL specified';
+      throw new Error(this.error);
+    }
+
+    if (this.client && this.client.getState() !== 'disconnected') {
+      await this.client.connect();
       return;
     }
 
@@ -824,39 +809,65 @@ export class LitShellTerminal extends LitElement {
     this.error = null;
 
     try {
-      // Load xterm.js
-      await this.loadXterm();
+      const targetTab = this.showTabs ? this.getActiveTab() : undefined;
+      const client = new TerminalClient({ url: this.url });
+      let autoSpawnAttempted = false;
+      this.client = client;
+      if (targetTab) {
+        targetTab.client = client;
+        this.tabs = [...this.tabs];
+      }
 
-      // Create client
-      this.client = new TerminalClient({ url: this.url });
+      client.onConnect(() => {
+        const previousSessionId = client.getPreviousSessionId();
+        if (previousSessionId) {
+          void this.recoverSession(client, targetTab, previousSessionId);
+          return;
+        }
 
-      this.client.onConnect(() => {
-        this.connected = true;
-        this.dispatchEvent(new CustomEvent('connect', { bubbles: true, composed: true }));
+        if (targetTab) targetTab.connected = true;
+        if (!targetTab || targetTab.id === this.activeTabId)
+          this.connected = true;
+        this.dispatchEvent(
+          new CustomEvent('connect', { bubbles: true, composed: true }),
+        );
 
-        if (this.autoSpawn) {
-          this.spawn();
+        if (this.autoSpawn && !autoSpawnAttempted) {
+          autoSpawnAttempted = true;
+          void this.spawn().catch(() => {
+            // Public error state and the `error` event are updated by spawn().
+          });
         }
       });
 
-      this.client.onDisconnect(() => {
-        this.connected = false;
-        this.sessionActive = false;
-        this.dispatchEvent(new CustomEvent('disconnect', { bubbles: true, composed: true }));
-      });
-
-      this.client.onError((err) => {
-        this.error = err.message;
-        this.setStatus(err.message, 'error');
+      client.onDisconnect(() => {
+        if (targetTab) {
+          targetTab.connected = false;
+          targetTab.sessionActive = false;
+          this.tabs = [...this.tabs];
+        }
+        if (!targetTab || targetTab.id === this.activeTabId) {
+          this.connected = false;
+          this.sessionActive = false;
+        }
         this.dispatchEvent(
-          new CustomEvent('error', { detail: { error: err }, bubbles: true, composed: true })
+          new CustomEvent('disconnect', { bubbles: true, composed: true }),
         );
       });
 
-      // Capture reference to this client for use in closures
-      const client = this.client;
+      client.onError((err) => {
+        this.error = err.message;
+        this.setStatus(err.message, 'error');
+        this.dispatchEvent(
+          new CustomEvent('error', {
+            detail: { error: err },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      });
 
-      this.client.onData((data) => {
+      client.onData((data) => {
         // Find the terminal that belongs to this client (for multi-tab support)
         if (this.showTabs) {
           const tab = this.tabs.find((t) => t.client === client);
@@ -868,7 +879,7 @@ export class LitShellTerminal extends LitElement {
         }
       });
 
-      this.client.onExit((code) => {
+      client.onExit((code) => {
         // Find the tab that belongs to this client
         if (this.showTabs) {
           const tab = this.tabs.find((t) => t.client === client);
@@ -877,7 +888,9 @@ export class LitShellTerminal extends LitElement {
             tab.sessionInfo = null;
             if (tab.terminal) {
               tab.terminal.writeln('');
-              tab.terminal.writeln(`\x1b[1;33m[Process exited with code: ${code}]\x1b[0m`);
+              tab.terminal.writeln(
+                `\x1b[1;33m[Process exited with code: ${code}]\x1b[0m`,
+              );
             }
             // Update component state if this is the active tab
             if (tab.id === this.activeTabId) {
@@ -891,15 +904,21 @@ export class LitShellTerminal extends LitElement {
           this.sessionInfo = null;
           if (this.terminal) {
             this.terminal.writeln('');
-            this.terminal.writeln(`\x1b[1;33m[Process exited with code: ${code}]\x1b[0m`);
+            this.terminal.writeln(
+              `\x1b[1;33m[Process exited with code: ${code}]\x1b[0m`,
+            );
           }
         }
         this.dispatchEvent(
-          new CustomEvent('exit', { detail: { exitCode: code }, bubbles: true, composed: true })
+          new CustomEvent('exit', {
+            detail: { exitCode: code },
+            bubbles: true,
+            composed: true,
+          }),
         );
       });
 
-      this.client.onSpawned((info) => {
+      client.onSpawned((info) => {
         // Update tab-specific state
         if (this.showTabs) {
           const tab = this.tabs.find((t) => t.client === client);
@@ -907,43 +926,85 @@ export class LitShellTerminal extends LitElement {
             tab.sessionInfo = info;
             tab.sessionActive = true;
             // Update label to show shell/container
-            tab.label = info.container || info.shell.split('/').pop() || 'Terminal';
+            tab.label =
+              info.container || info.shell.split('/').pop() || 'Terminal';
             this.tabs = [...this.tabs];
           }
         }
-        this.sessionInfo = info;
-        this.setStatus(`Session started: ${info.container || info.shell}`, 'success');
+        if (!targetTab || targetTab.id === this.activeTabId) {
+          this.sessionInfo = info;
+          this.sessionActive = true;
+        }
+        this.setStatus(
+          `Session started: ${info.container || info.shell}`,
+          'success',
+        );
         this.dispatchEvent(
-          new CustomEvent('spawned', { detail: { session: info }, bubbles: true, composed: true })
+          new CustomEvent('spawned', {
+            detail: { session: info },
+            bubbles: true,
+            composed: true,
+          }),
         );
       });
 
       // Server info and container list handlers
-      this.client.onServerInfo((info) => {
+      client.onServerInfo((info) => {
         this.serverInfo = info;
         if (info.dockerEnabled) {
           this.connectionMode = 'docker';
-          this.client?.requestContainerList();
+          client.requestContainerList();
+        } else if (!info.localEnabled) {
+          this.connectionMode = 'join';
         }
-        this.selectedShell = info.defaultShell;
+        this.selectedShell = info.dockerEnabled
+          ? (info.defaultContainerShell ?? '/bin/sh')
+          : info.defaultShell;
       });
 
-      this.client.onContainerList((containers) => {
+      client.onContainerList((containers) => {
         this.containers = containers;
         if (containers.length > 0 && !this.selectedContainer) {
-          this.selectedContainer = containers[0].name;
+          this.selectedContainer = containers[0]?.name ?? '';
         }
       });
 
       // Multiplexing event handlers
-      this.client.onSessionList((sessions) => {
+      client.onSessionList((sessions) => {
         this.availableSessions = sessions;
         if (sessions.length > 0 && !this.selectedSessionId) {
-          this.selectedSessionId = sessions[0].sessionId;
+          this.selectedSessionId = sessions[0]?.sessionId ?? '';
         }
       });
 
-      this.client.onClientJoined((sessionId, count) => {
+      client.onJoined((session, history) => {
+        const tab =
+          targetTab ??
+          this.tabs.find((candidate) => candidate.client === client);
+        if (history) (tab ? tab.terminal : this.terminal)?.write(history);
+        const info: SessionInfo = {
+          sessionId: session.sessionId,
+          shell: session.shell,
+          cwd: session.cwd,
+          cols: session.cols,
+          rows: session.rows,
+          createdAt: session.createdAt,
+          container: session.container,
+        };
+        if (tab) {
+          tab.sessionInfo = info;
+          tab.sessionActive = true;
+          tab.clientCount = session.clientCount;
+          this.tabs = [...this.tabs];
+        }
+        if (!tab || tab.id === this.activeTabId) {
+          this.sessionInfo = info;
+          this.sessionActive = true;
+          this.clientCount = session.clientCount;
+        }
+      });
+
+      client.onClientJoined((_sessionId, count) => {
         // Update tab-specific state
         if (this.showTabs) {
           const tab = this.tabs.find((t) => t.client === client);
@@ -952,11 +1013,13 @@ export class LitShellTerminal extends LitElement {
             this.tabs = [...this.tabs];
           }
         }
-        this.clientCount = count;
+        if (!targetTab || targetTab.id === this.activeTabId) {
+          this.clientCount = count;
+        }
         this.setStatus(`Client joined (${count} total)`, 'info');
       });
 
-      this.client.onClientLeft((sessionId, count) => {
+      client.onClientLeft((_sessionId, count) => {
         // Update tab-specific state
         if (this.showTabs) {
           const tab = this.tabs.find((t) => t.client === client);
@@ -965,14 +1028,19 @@ export class LitShellTerminal extends LitElement {
             this.tabs = [...this.tabs];
           }
         }
-        this.clientCount = count;
+        if (!targetTab || targetTab.id === this.activeTabId) {
+          this.clientCount = count;
+        }
         this.setStatus(`Client left (${count} remaining)`, 'info');
       });
 
-      this.client.onSessionClosed((sessionId, reason) => {
+      client.onSessionClosed((sessionId, reason) => {
         // Update tab-specific state
         if (this.showTabs) {
-          const tab = this.tabs.find((t) => t.client === client && t.sessionInfo?.sessionId === sessionId);
+          const tab = this.tabs.find(
+            (t) =>
+              t.client === client && t.sessionInfo?.sessionId === sessionId,
+          );
           if (tab) {
             tab.sessionActive = false;
             tab.sessionInfo = null;
@@ -988,25 +1056,52 @@ export class LitShellTerminal extends LitElement {
         client.requestSessionList();
       });
 
-      // Reconnect dialog handler
-      this.client.onReconnectWithSession((sessionId) => {
-        this.reconnectSessionId = sessionId;
-        this.showReconnectDialog = true;
-      });
-
-      await this.client.connect();
+      await client.connect();
 
       // Request session list after connecting
-      this.client.requestSessionList();
+      client.requestSessionList();
 
       // Sync state to active tab
-      if (this.showTabs) {
+      if (targetTab && targetTab.id === this.activeTabId) {
         this.syncStateToActiveTab();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Connection failed';
+      throw err;
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async recoverSession(
+    client: TerminalClient,
+    targetTab: Tab | undefined,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await client.join({
+        sessionId,
+        requestHistory: true,
+        historyLimit: 50_000,
+      });
+      client.clearPreviousSessionId();
+      this.showReconnectDialog = false;
+      this.reconnectSessionId = null;
+      this.setStatus('Recovered previous session', 'success');
+    } catch (cause) {
+      client.clearPreviousSessionId();
+      this.error = cause instanceof Error ? cause.message : String(cause);
+      this.setStatus(`Could not recover session: ${this.error}`, 'error');
+    } finally {
+      if (targetTab) {
+        targetTab.connected = true;
+        this.tabs = [...this.tabs];
+      }
+      if (!targetTab || targetTab.id === this.activeTabId)
+        this.connected = true;
+      this.dispatchEvent(
+        new CustomEvent('connect', { bubbles: true, composed: true }),
+      );
     }
   }
 
@@ -1020,6 +1115,8 @@ export class LitShellTerminal extends LitElement {
     }
     this.connected = false;
     this.sessionActive = false;
+    this.sessionInfo = null;
+    if (this.showTabs) this.syncStateToActiveTab();
   }
 
   /**
@@ -1037,21 +1134,7 @@ export class LitShellTerminal extends LitElement {
       // Initialize terminal UI if needed
       await this.initTerminalUI();
 
-      // Spawn session
-      const spawnOptions: TerminalOptions = {
-        shell: options?.shell || this.shell || undefined,
-        cwd: options?.cwd || this.cwd || undefined,
-        cols: this.terminal?.cols || this.cols,
-        rows: this.terminal?.rows || this.rows,
-        env: options?.env,
-        // Docker container options
-        container: options?.container || this.container || undefined,
-        containerShell: options?.containerShell || this.containerShell || undefined,
-        containerUser: options?.containerUser || this.containerUser || undefined,
-        containerCwd: options?.containerCwd || this.containerCwd || undefined,
-      };
-
-      const info = await this.client.spawn(spawnOptions);
+      const info = await this.client.spawn(this.createSpawnOptions(options));
       this.sessionActive = true;
       this.sessionInfo = info;
 
@@ -1070,11 +1153,39 @@ export class LitShellTerminal extends LitElement {
 
       return info;
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to spawn session';
+      this.error =
+        err instanceof Error ? err.message : 'Failed to spawn session';
       throw err;
     } finally {
       this.loading = false;
     }
+  }
+
+  private createSpawnOptions(options: TerminalOptions = {}): TerminalOptions {
+    const terminal = this.terminal;
+    const { allowJoin = this.allowJoin } = options;
+    return {
+      ...options,
+      cols: terminal ? terminal.cols : this.cols,
+      rows: terminal ? terminal.rows : this.rows,
+      shell: firstNonEmptyString(options.shell, this.shell),
+      cwd: firstNonEmptyString(options.cwd, this.cwd),
+      env: options.env,
+      container: firstNonEmptyString(options.container, this.container),
+      containerShell: firstNonEmptyString(
+        options.containerShell,
+        this.containerShell,
+      ),
+      containerUser: firstNonEmptyString(
+        options.containerUser,
+        this.containerUser,
+      ),
+      containerCwd: firstNonEmptyString(
+        options.containerCwd,
+        this.containerCwd,
+      ),
+      allowJoin,
+    };
   }
 
   /**
@@ -1083,24 +1194,23 @@ export class LitShellTerminal extends LitElement {
   private async initTerminalUI(): Promise<void> {
     if (this.terminal) return;
 
-    await this.loadXterm();
     await this.updateComplete;
 
     // Get the correct container (either single terminal or tab-specific)
-    let container: Element | null = null;
-    if (this.showTabs && this.activeTabId) {
-      container = this.shadowRoot?.querySelector(`.tab-terminal-container[data-tab-id="${this.activeTabId}"]`) ?? null;
-    } else {
-      container = this.shadowRoot?.querySelector('.terminal-container') ?? null;
-    }
+    const container =
+      this.showTabs && this.activeTabId
+        ? (this.shadowRoot?.querySelector(
+            `.tab-terminal-container[data-tab-id="${this.activeTabId}"] .xterm-mount`,
+          ) ?? null)
+        : (this.shadowRoot?.querySelector('.terminal-container .xterm-mount') ??
+          null);
     if (!container) return;
 
     // Get theme colors
     const terminalTheme = this.getTerminalTheme();
 
     // Create terminal
-    const Terminal = this.xtermModule.Terminal;
-    const term: ITerminal = new Terminal({
+    const term = new Terminal({
       cursorBlink: true,
       fontSize: this.fontSize,
       fontFamily: this.fontFamily,
@@ -1110,8 +1220,7 @@ export class LitShellTerminal extends LitElement {
     });
 
     // Create fit addon
-    const FitAddon = this.fitAddonModule.FitAddon;
-    const fit: IFitAddon = new FitAddon();
+    const fit = new FitAddon();
 
     // Store references
     this.terminal = term;
@@ -1162,11 +1271,14 @@ export class LitShellTerminal extends LitElement {
   /**
    * Get terminal theme based on component theme
    */
-  private getTerminalTheme(): any {
+  private getTerminalTheme(): ITheme {
     // Determine effective theme (handle 'auto' by checking system preference)
     let effectiveTheme = this.theme;
     if (this.theme === 'auto') {
-      effectiveTheme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      effectiveTheme = window.matchMedia('(prefers-color-scheme: light)')
+        .matches
+        ? 'light'
+        : 'dark';
     }
 
     if (effectiveTheme === 'light') {
@@ -1175,7 +1287,7 @@ export class LitShellTerminal extends LitElement {
         foreground: '#1f2937',
         cursor: '#1f2937',
         cursorAccent: '#ffffff',
-        selection: '#b4d5fe',
+        selectionBackground: '#b4d5fe',
         selectionForeground: '#1f2937',
       };
     }
@@ -1186,7 +1298,7 @@ export class LitShellTerminal extends LitElement {
       foreground: '#cccccc',
       cursor: '#ffffff',
       cursorAccent: '#1e1e1e',
-      selection: '#264f78',
+      selectionBackground: '#264f78',
       selectionForeground: '#ffffff',
     };
   }
@@ -1200,6 +1312,7 @@ export class LitShellTerminal extends LitElement {
     }
     this.sessionActive = false;
     this.sessionInfo = null;
+    if (this.showTabs) this.syncStateToActiveTab();
   }
 
   /**
@@ -1247,16 +1360,28 @@ export class LitShellTerminal extends LitElement {
       this.resizeObserver = null;
     }
 
-    if (this.terminal) {
-      this.terminal.dispose();
-      this.terminal = null;
-    }
+    this.mobileMediaQuery?.removeEventListener(
+      'change',
+      this.mobileMediaQueryHandler,
+    );
+    this.mobileMediaQuery = null;
 
-    if (this.client) {
-      this.client.disconnect();
-      this.client = null;
-    }
+    const terminals = new Set(
+      [this.terminal, ...this.tabs.map((tab) => tab.terminal)].filter(
+        (terminal): terminal is Terminal => terminal !== null,
+      ),
+    );
+    for (const terminal of terminals) terminal.dispose();
 
+    const clients = new Set(
+      [this.client, ...this.tabs.map((tab) => tab.client)].filter(
+        (client): client is TerminalClient => client !== null,
+      ),
+    );
+    for (const client of clients) client.disconnect();
+
+    this.terminal = null;
+    this.client = null;
     this.fitAddon = null;
   }
 
@@ -1314,7 +1439,7 @@ export class LitShellTerminal extends LitElement {
     this.clientCount = tab.clientCount;
 
     // Focus the terminal and fit it
-    this.updateComplete.then(() => {
+    void this.updateComplete.then(() => {
       if (tab.terminal) {
         tab.terminal.focus();
       }
@@ -1332,6 +1457,7 @@ export class LitShellTerminal extends LitElement {
     if (tabIndex === -1) return;
 
     const tab = this.tabs[tabIndex];
+    if (!tab) return;
 
     // Cleanup tab resources
     if (tab.terminal) {
@@ -1348,7 +1474,8 @@ export class LitShellTerminal extends LitElement {
     if (this.activeTabId === tabId && this.tabs.length > 0) {
       // Switch to previous tab, or first if we were first
       const newIndex = Math.max(0, tabIndex - 1);
-      this.switchTab(this.tabs[newIndex].id);
+      const nextTab = this.tabs[newIndex];
+      if (nextTab) this.switchTab(nextTab.id);
     }
 
     // If no tabs left, clear state
@@ -1389,32 +1516,49 @@ export class LitShellTerminal extends LitElement {
 
     return html`
       <div class="tab-bar">
-        ${this.tabs.map(
-          (tab) => html`
-            <button
-              class="tab ${tab.id === this.activeTabId ? 'active' : ''}"
-              @click=${() => this.switchTab(tab.id)}
-            >
-              <span class="tab-status ${tab.sessionActive ? 'connected' : ''}"></span>
-              <span>${tab.label}</span>
-              ${this.tabs.length > 1
-                ? html`
-                    <button
-                      class="tab-close"
-                      @click=${(e: Event) => {
-                        e.stopPropagation();
-                        this.closeTab(tab.id);
-                      }}
-                      title="Close tab"
-                    >
-                      ×
-                    </button>
-                  `
-                : nothing}
-            </button>
-          `
-        )}
-        <button class="tab-add" @click=${() => this.createTab()} title="New tab">
+        <div class="tab-list" role="tablist" aria-label="Terminal sessions">
+          ${repeat(
+            this.tabs,
+            (tab) => tab.id,
+            (tab) => html`
+              <button
+                class="tab ${tab.id === this.activeTabId ? 'active' : ''}"
+                id="tab-${tab.id}"
+                role="tab"
+                aria-controls="panel-${tab.id}"
+                aria-selected=${tab.id === this.activeTabId ? 'true' : 'false'}
+                tabindex=${tab.id === this.activeTabId ? '0' : '-1'}
+                @click=${() => this.switchTab(tab.id)}
+              >
+                <span
+                  class="tab-status ${tab.sessionActive ? 'connected' : ''}"
+                  aria-hidden="true"
+                ></span>
+                <span>${tab.label}</span>
+              </button>
+            `,
+          )}
+        </div>
+        ${
+          this.tabs.length > 1
+            ? html`
+                <button
+                  class="tab-close"
+                  aria-label="Close active terminal tab"
+                  @click=${() => this.closeTab(this.activeTabId)}
+                  title="Close active tab"
+                >
+                  ×
+                </button>
+              `
+            : nothing
+        }
+        <button
+          class="tab-add"
+          aria-label="New terminal tab"
+          @click=${() => this.createTab()}
+          title="New tab"
+        >
           +
         </button>
       </div>
@@ -1426,7 +1570,10 @@ export class LitShellTerminal extends LitElement {
   /**
    * Set status message
    */
-  private setStatus(message: string, type: 'info' | 'error' | 'success' = 'info'): void {
+  private setStatus(
+    message: string,
+    type: 'info' | 'error' | 'success' = 'info',
+  ): void {
     this.statusMessage = message;
     this.statusType = type;
 
@@ -1458,11 +1605,13 @@ export class LitShellTerminal extends LitElement {
     // Apply theme to xterm.js terminal
     this.applyTerminalTheme();
 
-    this.dispatchEvent(new CustomEvent('theme-change', {
-      detail: { theme: this.theme },
-      bubbles: true,
-      composed: true
-    }));
+    this.dispatchEvent(
+      new CustomEvent('theme-change', {
+        detail: { theme: this.theme },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   /**
@@ -1494,9 +1643,15 @@ export class LitShellTerminal extends LitElement {
    */
   private handleModeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
-    this.connectionMode = select.value as 'local' | 'docker' | 'docker-attach' | 'join';
+    this.connectionMode = select.value as
+      'local' | 'docker' | 'docker-attach' | 'join';
 
-    if ((this.connectionMode === 'docker' || this.connectionMode === 'docker-attach') && this.client && this.connected) {
+    if (
+      (this.connectionMode === 'docker' ||
+        this.connectionMode === 'docker-attach') &&
+      this.client &&
+      this.connected
+    ) {
       this.client.requestContainerList();
     }
     if (this.connectionMode === 'join' && this.client && this.connected) {
@@ -1516,7 +1671,10 @@ export class LitShellTerminal extends LitElement {
   /**
    * Join an existing session
    */
-  async join(sessionId: string, requestHistory = true): Promise<SharedSessionInfo> {
+  async join(
+    sessionId: string,
+    requestHistory = true,
+  ): Promise<SharedSessionInfo> {
     if (!this.client || !this.connected) {
       throw new Error('Not connected to server');
     }
@@ -1541,7 +1699,7 @@ export class LitShellTerminal extends LitElement {
         cwd: session.cwd,
         cols: session.cols,
         rows: session.rows,
-        createdAt: session.createdAt || new Date(),
+        createdAt: session.createdAt,
         container: session.container,
       };
       this.clientCount = session.clientCount;
@@ -1551,7 +1709,10 @@ export class LitShellTerminal extends LitElement {
         this.syncStateToActiveTab();
       }
 
-      this.setStatus(`Joined session (${session.clientCount} clients)`, 'success');
+      this.setStatus(
+        `Joined session (${session.clientCount} clients)`,
+        'success',
+      );
 
       // Focus terminal
       if (this.terminal) {
@@ -1560,7 +1721,8 @@ export class LitShellTerminal extends LitElement {
 
       return session;
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to join session';
+      this.error =
+        err instanceof Error ? err.message : 'Failed to join session';
       throw err;
     } finally {
       this.loading = false;
@@ -1575,6 +1737,7 @@ export class LitShellTerminal extends LitElement {
       this.client.leave(this.sessionInfo.sessionId);
       this.sessionActive = false;
       this.sessionInfo = null;
+      if (this.showTabs) this.syncStateToActiveTab();
       this.setStatus('Left session', 'info');
     }
   }
@@ -1591,7 +1754,10 @@ export class LitShellTerminal extends LitElement {
       if (this.connectionMode === 'join' && this.selectedSessionId) {
         // Join existing session
         await this.join(this.selectedSessionId);
-      } else if (this.connectionMode === 'docker-attach' && this.selectedContainer) {
+      } else if (
+        this.connectionMode === 'docker-attach' &&
+        this.selectedContainer
+      ) {
         // Docker attach mode - connect to container's main process
         const options: TerminalOptions = {
           container: this.selectedContainer,
@@ -1603,12 +1769,12 @@ export class LitShellTerminal extends LitElement {
         // Spawn new session (local or docker exec)
         const options: TerminalOptions = {
           orphanTimeout: this.orphanTimeout,
-          useTmux: this.useTmux,
         };
 
         if (this.connectionMode === 'docker' && this.selectedContainer) {
           options.container = this.selectedContainer;
           options.containerShell = this.selectedShell || '/bin/sh';
+          options.useTmux = this.useTmux;
         } else {
           options.shell = this.selectedShell || undefined;
         }
@@ -1641,11 +1807,14 @@ export class LitShellTerminal extends LitElement {
       await this.join(this.reconnectSessionId, true);
       this.setStatus('Rejoined previous session', 'success');
     } catch (err) {
-      this.setStatus(`Failed to rejoin: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      this.setStatus(
+        `Failed to rejoin: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     }
 
     this.reconnectSessionId = null;
-    this.client?.clearPreviousSessionId();
+    this.client.clearPreviousSessionId();
   }
 
   /**
@@ -1667,7 +1836,9 @@ export class LitShellTerminal extends LitElement {
       <div class="reconnect-dialog-overlay">
         <div class="reconnect-dialog">
           <h3>Session Available</h3>
-          <p>Your previous session is still active. Would you like to rejoin?</p>
+          <p>
+            Your previous session is still active. Would you like to rejoin?
+          </p>
           <div class="reconnect-dialog-buttons">
             <button class="btn-primary" @click=${this.handleReconnectYes}>
               Yes, Rejoin
@@ -1687,152 +1858,327 @@ export class LitShellTerminal extends LitElement {
   private renderConnectionPanel() {
     if (!this.showConnectionPanel) return nothing;
 
-    const runningContainers = this.containers.filter(c => c.state === 'running');
-    const acceptingSessions = this.availableSessions.filter(s => s.accepting);
+    const runningContainers = this.containers.filter(
+      (container) => container.state === 'running',
+    );
+    const acceptingSessions = this.availableSessions.filter(
+      (session) => session.accepting,
+    );
 
     return html`
       <div class="connection-panel">
-        <div class="connection-panel-title">
-          <span>Connection</span>
-          ${this.availableSessions.length > 0
-            ? html`<span style="font-size: 11px; color: var(--ls-status-connected);">${this.availableSessions.length} session(s) available</span>`
-            : nothing}
-          ${this.serverInfo?.dockerEnabled
-            ? html`<span style="font-size: 11px; color: var(--ls-text-muted);">Docker enabled</span>`
-            : nothing}
-        </div>
+        ${this.renderConnectionTitle()}
         <div class="connection-form">
-          <div class="form-group">
-            <label>Mode</label>
-            <select
-              .value=${this.connectionMode}
-              @change=${this.handleModeChange}
-              ?disabled=${this.sessionActive}
-            >
-              <option value="local">New Local Shell</option>
-              ${this.serverInfo?.dockerEnabled
-                ? html`
-                    <option value="docker">Docker Exec (new shell)</option>
-                    <option value="docker-attach">Docker Attach (main process)</option>
-                  `
-                : nothing}
-              ${acceptingSessions.length > 0
-                ? html`<option value="join">Join Existing Session</option>`
-                : nothing}
-            </select>
-          </div>
-
-          ${this.connectionMode === 'join' ? html`
-            <div class="form-group">
-              <label style="display: flex; justify-content: space-between; align-items: center;">
-                <span>Session</span>
-                <button
-                  style="font-size: 10px; padding: 2px 6px;"
-                  @click=${this.refreshSessions}
-                  ?disabled=${!this.connected}
-                >Refresh</button>
-              </label>
-              <select
-                .value=${this.selectedSessionId}
-                @change=${(e: Event) => this.selectedSessionId = (e.target as HTMLSelectElement).value}
-                ?disabled=${this.sessionActive}
-              >
-                ${acceptingSessions.length === 0
-                  ? html`<option value="">No sessions available</option>`
-                  : acceptingSessions.map(s => html`
-                      <option value=${s.sessionId}>
-                        ${s.label || s.sessionId.substring(0, 12)}
-                        (${s.type === 'local' ? s.shell : s.container || s.type})
-                        - ${s.clientCount} client(s)
-                      </option>
-                    `)}
-              </select>
-            </div>
-          ` : this.connectionMode === 'docker' || this.connectionMode === 'docker-attach' ? html`
-            <div class="form-group">
-              <label>Container</label>
-              <select
-                .value=${this.selectedContainer}
-                @change=${(e: Event) => this.selectedContainer = (e.target as HTMLSelectElement).value}
-                ?disabled=${this.sessionActive}
-              >
-                ${runningContainers.length === 0
-                  ? html`<option value="">No containers running</option>`
-                  : runningContainers.map(c => html`
-                      <option value=${c.name}>${c.name} (${c.image})</option>
-                    `)}
-              </select>
-            </div>
-          ` : nothing}
-
-          ${this.connectionMode !== 'join' && this.connectionMode !== 'docker-attach' ? html`
-            <div class="form-group">
-              <label>Shell</label>
-              <select
-                .value=${this.selectedShell}
-                @change=${(e: Event) => this.selectedShell = (e.target as HTMLSelectElement).value}
-                ?disabled=${this.sessionActive}
-              >
-                ${this.serverInfo?.allowedShells.length
-                  ? this.serverInfo.allowedShells.map(s => html`<option value=${s}>${s}</option>`)
-                  : html`
-                      <option value="/bin/bash">/bin/bash</option>
-                      <option value="/bin/sh">/bin/sh</option>
-                      <option value="/bin/zsh">/bin/zsh</option>
-                    `}
-              </select>
-            </div>
-          ` : nothing}
-
-          ${this.connectionMode === 'local' || this.connectionMode === 'docker' ? html`
-            <div class="form-group">
-              <label>Session Timeout</label>
-              <select
-                .value=${String(this.orphanTimeout)}
-                @change=${(e: Event) => this.orphanTimeout = parseInt((e.target as HTMLSelectElement).value)}
-                ?disabled=${this.sessionActive}
-              >
-                <option value="60000">1 minute</option>
-                <option value="300000">5 minutes</option>
-                <option value="900000">15 minutes</option>
-                <option value="3600000">1 hour</option>
-                <option value="21600000">6 hours</option>
-                <option value="86400000">24 hours</option>
-                <option value="604800000">1 week</option>
-              </select>
-            </div>
-          ` : nothing}
-
-          ${this.connectionMode === 'docker' ? html`
-            <div class="form-group">
-              <label style="display: flex; align-items: center; gap: 6px;">
-                <input
-                  type="checkbox"
-                  .checked=${this.useTmux}
-                  @change=${(e: Event) => this.useTmux = (e.target as HTMLInputElement).checked}
-                  ?disabled=${this.sessionActive}
-                />
-                Use tmux (persist forever)
-              </label>
-            </div>
-          ` : nothing}
-
-          <div class="form-group">
-            ${!this.connected
-              ? html`<button class="btn-primary" @click=${this.handlePanelConnect} ?disabled=${this.loading}>
-                  ${this.loading ? 'Connecting...' : 'Connect'}
-                </button>`
-              : !this.sessionActive
-              ? html`<button class="btn-primary" @click=${this.handlePanelConnect} ?disabled=${this.loading || (this.connectionMode === 'join' && !this.selectedSessionId) || ((this.connectionMode === 'docker' || this.connectionMode === 'docker-attach') && !this.selectedContainer)}>
-                  ${this.loading ? 'Starting...' : this.connectionMode === 'join' ? 'Join Session' : this.connectionMode === 'docker-attach' ? 'Attach' : 'Start Session'}
-                </button>`
-              : html`<button class="btn-danger" @click=${this.kill}>
-                  ${this.clientCount > 1 ? 'Leave Session' : 'Stop Session'}
-                </button>`}
-          </div>
+          ${this.renderConnectionMode(acceptingSessions.length)}
+          ${this.renderConnectionTarget(acceptingSessions, runningContainers)}
+          ${this.renderShellSelector()} ${this.renderTimeoutSelector()}
+          ${this.renderTmuxSelector()} ${this.renderConnectionAction()}
         </div>
       </div>
     `;
+  }
+
+  private renderConnectionTitle() {
+    return html`
+      <div class="connection-panel-title">
+        <span>Connection</span>
+        ${
+          this.availableSessions.length > 0
+            ? html`<span
+                style="font-size: 11px; color: var(--ls-status-connected);"
+                >${this.availableSessions.length} session(s) available</span
+              >`
+            : nothing
+        }
+        ${
+          this.serverInfo?.dockerEnabled
+            ? html`<span style="font-size: 11px; color: var(--ls-text-muted);"
+                >Docker enabled</span
+              >`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  private renderConnectionMode(acceptingSessionCount: number) {
+    return html`
+      <div class="form-group">
+        <label for="connection-mode">Mode</label>
+        <select
+          id="connection-mode"
+          .value=${this.connectionMode}
+          @change=${this.handleModeChange}
+          ?disabled=${this.sessionActive}
+        >
+          ${this.renderLocalModeOption()} ${this.renderDockerModeOptions()}
+          ${this.renderJoinModeOption(acceptingSessionCount)}
+        </select>
+      </div>
+    `;
+  }
+
+  private renderLocalModeOption() {
+    return this.renderModeOption(
+      !this.localExecutionDisabled(),
+      html`<option value="local">New Local Shell</option>`,
+    );
+  }
+
+  private renderDockerModeOptions() {
+    return this.renderModeOption(
+      this.serverInfo !== null && this.serverInfo.dockerEnabled,
+      html`
+        <option value="docker">Docker Exec (new shell)</option>
+        <option value="docker-attach">Docker Attach (main process)</option>
+      `,
+    );
+  }
+
+  private renderJoinModeOption(acceptingSessionCount: number) {
+    return this.renderModeOption(
+      acceptingSessionCount > 0,
+      html`<option value="join">Join Existing Session</option>`,
+    );
+  }
+
+  private renderModeOption(visible: boolean, option: TemplateResult) {
+    return visible ? option : nothing;
+  }
+
+  private localExecutionDisabled(): boolean {
+    return this.serverInfo !== null && !this.serverInfo.localEnabled;
+  }
+
+  private renderConnectionTarget(
+    acceptingSessions: SharedSessionInfo[],
+    runningContainers: ContainerInfo[],
+  ) {
+    if (this.connectionMode === 'join') {
+      return this.renderSessionSelector(acceptingSessions);
+    }
+    if (
+      this.connectionMode === 'docker' ||
+      this.connectionMode === 'docker-attach'
+    ) {
+      return this.renderContainerSelector(runningContainers);
+    }
+    return nothing;
+  }
+
+  private renderSessionSelector(sessions: SharedSessionInfo[]) {
+    return html`
+      <div class="form-group">
+        <label
+          for="connection-session"
+          style="display: flex; justify-content: space-between; align-items: center;"
+        >
+          <span>Session</span>
+          <button
+            style="font-size: 10px; padding: 2px 6px;"
+            @click=${this.refreshSessions}
+            ?disabled=${!this.connected}
+          >
+            Refresh
+          </button>
+        </label>
+        <select
+          id="connection-session"
+          .value=${this.selectedSessionId}
+          @change=${this.handleSessionSelection}
+          ?disabled=${this.sessionActive}
+        >
+          ${
+            sessions.length === 0
+              ? html`<option value="">No sessions available</option>`
+              : sessions.map(
+                  (session) => html`
+                    <option value=${session.sessionId}>
+                      ${session.label || session.sessionId.substring(0, 12)}
+                      (${this.sessionTargetLabel(session)}) -
+                      ${session.clientCount} client(s)
+                    </option>
+                  `,
+                )
+          }
+        </select>
+      </div>
+    `;
+  }
+
+  private sessionTargetLabel(session: SharedSessionInfo): string {
+    if (session.type === 'local') return session.shell;
+    return session.container || session.type;
+  }
+
+  private handleSessionSelection(event: Event): void {
+    this.selectedSessionId = (event.target as HTMLSelectElement).value;
+  }
+
+  private renderContainerSelector(containers: ContainerInfo[]) {
+    return html`
+      <div class="form-group">
+        <label for="connection-container">Container</label>
+        <select
+          id="connection-container"
+          .value=${this.selectedContainer}
+          @change=${this.handleContainerSelection}
+          ?disabled=${this.sessionActive}
+        >
+          ${
+            containers.length === 0
+              ? html`<option value="">No containers running</option>`
+              : containers.map(
+                  (container) => html`
+                    <option value=${container.name}>
+                      ${container.name} (${container.image})
+                    </option>
+                  `,
+                )
+          }
+        </select>
+      </div>
+    `;
+  }
+
+  private handleContainerSelection(event: Event): void {
+    this.selectedContainer = (event.target as HTMLSelectElement).value;
+  }
+
+  private renderShellSelector() {
+    if (
+      this.connectionMode === 'join' ||
+      this.connectionMode === 'docker-attach'
+    ) {
+      return nothing;
+    }
+    const allowedShells = this.serverInfo?.allowedShells;
+    return html`
+      <div class="form-group">
+        <label for="connection-shell">Shell</label>
+        <select
+          id="connection-shell"
+          .value=${this.selectedShell}
+          @change=${this.handleShellSelection}
+          ?disabled=${this.sessionActive}
+        >
+          ${
+            allowedShells?.length
+              ? allowedShells.map(
+                  (shell) => html`<option value=${shell}>${shell}</option>`,
+                )
+              : html`
+                  <option value="/bin/bash">/bin/bash</option>
+                  <option value="/bin/sh">/bin/sh</option>
+                  <option value="/bin/zsh">/bin/zsh</option>
+                `
+          }
+        </select>
+      </div>
+    `;
+  }
+
+  private handleShellSelection(event: Event): void {
+    this.selectedShell = (event.target as HTMLSelectElement).value;
+  }
+
+  private renderTimeoutSelector() {
+    if (this.connectionMode !== 'local' && this.connectionMode !== 'docker') {
+      return nothing;
+    }
+    return html`
+      <div class="form-group">
+        <label for="connection-timeout">Session Timeout</label>
+        <select
+          id="connection-timeout"
+          .value=${String(this.orphanTimeout)}
+          @change=${this.handleTimeoutSelection}
+          ?disabled=${this.sessionActive}
+        >
+          <option value="60000">1 minute</option>
+          <option value="300000">5 minutes</option>
+          <option value="900000">15 minutes</option>
+          <option value="3600000">1 hour</option>
+          <option value="21600000">6 hours</option>
+          <option value="86400000">24 hours</option>
+          <option value="604800000">1 week</option>
+        </select>
+      </div>
+    `;
+  }
+
+  private handleTimeoutSelection(event: Event): void {
+    this.orphanTimeout = Number.parseInt(
+      (event.target as HTMLSelectElement).value,
+      10,
+    );
+  }
+
+  private renderTmuxSelector() {
+    if (this.connectionMode !== 'docker') return nothing;
+    return html`
+      <div class="form-group">
+        <label style="display: flex; align-items: center; gap: 6px;">
+          <input
+            type="checkbox"
+            .checked=${this.useTmux}
+            @change=${this.handleTmuxSelection}
+            ?disabled=${this.sessionActive}
+          />
+          Use tmux (persist forever)
+        </label>
+      </div>
+    `;
+  }
+
+  private handleTmuxSelection(event: Event): void {
+    this.useTmux = (event.target as HTMLInputElement).checked;
+  }
+
+  private renderConnectionAction() {
+    let label = 'Start Session';
+    if (this.loading) label = 'Starting...';
+    if (this.connectionMode === 'join') label = 'Join Session';
+    if (this.connectionMode === 'docker-attach') label = 'Attach';
+
+    return html`
+      <div class="form-group">
+        ${
+          !this.connected
+            ? html`<button
+                class="btn-primary"
+                @click=${this.handlePanelConnect}
+                ?disabled=${this.loading}
+              >
+                ${this.loading ? 'Connecting...' : 'Connect'}
+              </button>`
+            : this.sessionActive
+              ? html`<button
+                  class="btn-danger"
+                  @click=${this.clientCount > 1 ? this.leave : this.kill}
+                >
+                  ${this.clientCount > 1 ? 'Leave Session' : 'Stop Session'}
+                </button>`
+              : html`<button
+                  class="btn-primary"
+                  @click=${this.handlePanelConnect}
+                  ?disabled=${this.connectionActionDisabled()}
+                >
+                  ${label}
+                </button>`
+        }
+      </div>
+    `;
+  }
+
+  private connectionActionDisabled(): boolean {
+    const missingRequiredTarget: Record<typeof this.connectionMode, boolean> = {
+      local: this.localExecutionDisabled(),
+      join: !this.selectedSessionId,
+      docker: !this.selectedContainer,
+      'docker-attach': !this.selectedContainer,
+    };
+    return this.loading || missingRequiredTarget[this.connectionMode];
   }
 
   /**
@@ -1843,44 +2189,58 @@ export class LitShellTerminal extends LitElement {
 
     return html`
       <div class="settings-dropdown">
-        <button @click=${this.toggleSettingsMenu} title="Settings">
+        <button
+          aria-label="Settings"
+          aria-expanded=${this.settingsMenuOpen ? 'true' : 'false'}
+          aria-haspopup="menu"
+          @click=${this.toggleSettingsMenu}
+          title="Settings"
+        >
           ⚙️
         </button>
-        ${this.settingsMenuOpen ? html`
-          <div class="settings-menu">
-            <div class="settings-menu-item">
-              <span>Theme</span>
-              <select
-                .value=${this.theme}
-                @change=${this.handleThemeChange}
-              >
-                <option value="dark">Dark</option>
-                <option value="light">Light</option>
-                <option value="auto">Auto</option>
-              </select>
-            </div>
-            <div class="settings-divider"></div>
-            <div class="settings-menu-item">
-              <span>Font Size</span>
-              <select
-                .value=${String(this.fontSize)}
-                @change=${(e: Event) => {
-                  this.fontSize = parseInt((e.target as HTMLSelectElement).value);
-                  this.applyTerminalFontSize();
-                }}
-              >
-                <option value="12">12px</option>
-                <option value="14">14px</option>
-                <option value="16">16px</option>
-                <option value="18">18px</option>
-              </select>
-            </div>
-            <div class="settings-divider"></div>
-            <div class="settings-menu-item" @click=${this.clear}>
-              <span>Clear Terminal</span>
-            </div>
-          </div>
-        ` : nothing}
+        ${
+          this.settingsMenuOpen
+            ? html`
+                <div class="settings-menu">
+                  <div class="settings-menu-item">
+                    <label for="terminal-theme">Theme</label>
+                    <select
+                      id="terminal-theme"
+                      .value=${this.theme}
+                      @change=${this.handleThemeChange}
+                    >
+                      <option value="dark">Dark</option>
+                      <option value="light">Light</option>
+                      <option value="auto">Auto</option>
+                    </select>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-menu-item">
+                    <label for="terminal-font-size">Font Size</label>
+                    <select
+                      id="terminal-font-size"
+                      .value=${String(this.fontSize)}
+                      @change=${(e: Event) => {
+                        this.fontSize = parseInt(
+                          (e.target as HTMLSelectElement).value,
+                        );
+                        this.applyTerminalFontSize();
+                      }}
+                    >
+                      <option value="12">12px</option>
+                      <option value="14">14px</option>
+                      <option value="16">16px</option>
+                      <option value="18">18px</option>
+                    </select>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <button class="settings-menu-item" @click=${this.clear}>
+                    <span>Clear Terminal</span>
+                  </button>
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }
@@ -1978,61 +2338,163 @@ export class LitShellTerminal extends LitElement {
     return html`
       <!-- Toggle bar to show/hide keyboard -->
       <div class="touch-keyboard-toggle">
-        <button @click=${this.toggleTouchKeyboard} title="${this.showTouchKeyboard ? 'Hide' : 'Show'} keyboard">
+        <button
+          @click=${this.toggleTouchKeyboard}
+          title="${this.showTouchKeyboard ? 'Hide' : 'Show'} keyboard"
+        >
           ${this.showTouchKeyboard ? '▼' : '▲'}
         </button>
       </div>
 
-      ${this.showTouchKeyboard ? html`
-        <div class="touch-keyboard">
-          <!-- Row 1: ESC, navigation, special -->
-          <div class="touch-keyboard-row">
-            <button class="touch-key" @click=${() => this.sendEscape('')}>ESC</button>
-            <button class="touch-key" @click=${() => this.sendKey('/')}>/</button>
-            <button class="touch-key" @click=${() => this.sendKey('-')}>-</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[H')}>HOME</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[A')}>↑</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[F')}>END</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[5~')}>PGUP</button>
-          </div>
+      ${
+        this.showTouchKeyboard
+          ? html`
+              <div class="touch-keyboard">
+                <!-- Row 1: ESC, navigation, special -->
+                <div class="touch-keyboard-row">
+                  <button class="touch-key" @click=${() => this.sendEscape('')}>
+                    ESC
+                  </button>
+                  <button class="touch-key" @click=${() => this.sendKey('/')}>
+                    /
+                  </button>
+                  <button class="touch-key" @click=${() => this.sendKey('-')}>
+                    -
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[H')}
+                  >
+                    HOME
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[A')}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[F')}
+                  >
+                    END
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[5~')}
+                  >
+                    PGUP
+                  </button>
+                </div>
 
-          <!-- Row 2: TAB, modifiers, arrows -->
-          <div class="touch-keyboard-row">
-            <button class="touch-key" @click=${() => this.sendKey('\t')}>TAB</button>
-            <button class="touch-key toggle-btn ${this.ctrlPressed ? 'active' : ''}" @click=${this.toggleCtrl}>CTRL</button>
-            <button class="touch-key toggle-btn ${this.altPressed ? 'active' : ''}" @click=${this.toggleAlt}>ALT</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[D')}>←</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[B')}>↓</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[C')}>→</button>
-            <button class="touch-key" @click=${() => this.sendEscape('[6~')}>PGDN</button>
-          </div>
+                <!-- Row 2: TAB, modifiers, arrows -->
+                <div class="touch-keyboard-row">
+                  <button class="touch-key" @click=${() => this.sendKey('\t')}>
+                    TAB
+                  </button>
+                  <button
+                    class="touch-key toggle-btn ${this.ctrlPressed ? 'active' : ''}"
+                    @click=${this.toggleCtrl}
+                  >
+                    CTRL
+                  </button>
+                  <button
+                    class="touch-key toggle-btn ${this.altPressed ? 'active' : ''}"
+                    @click=${this.toggleAlt}
+                  >
+                    ALT
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[D')}
+                  >
+                    ←
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[B')}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[C')}
+                  >
+                    →
+                  </button>
+                  <button
+                    class="touch-key"
+                    @click=${() => this.sendEscape('[6~')}
+                  >
+                    PGDN
+                  </button>
+                </div>
 
-          <!-- Expandable extra rows -->
-          <div class="touch-keyboard-extra ${this.showExtraKeyRows ? 'expanded' : ''}">
-            <!-- Row 3: Common control sequences -->
-            <div class="touch-keyboard-row">
-              <button class="touch-key danger" @click=${() => this.sendCtrl('C')}>^C</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('D')}>^D</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('Z')}>^Z</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('L')}>^L</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('A')}>^A</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('E')}>^E</button>
-              <button class="touch-key" @click=${() => this.sendCtrl('R')}>^R</button>
-            </div>
-          </div>
+                <!-- Expandable extra rows -->
+                <div
+                  class="touch-keyboard-extra ${this.showExtraKeyRows ? 'expanded' : ''}"
+                >
+                  <!-- Row 3: Common control sequences -->
+                  <div class="touch-keyboard-row">
+                    <button
+                      class="touch-key danger"
+                      @click=${() => this.sendCtrl('C')}
+                    >
+                      ^C
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('D')}
+                    >
+                      ^D
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('Z')}
+                    >
+                      ^Z
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('L')}
+                    >
+                      ^L
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('A')}
+                    >
+                      ^A
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('E')}
+                    >
+                      ^E
+                    </button>
+                    <button
+                      class="touch-key"
+                      @click=${() => this.sendCtrl('R')}
+                    >
+                      ^R
+                    </button>
+                  </div>
+                </div>
 
-          <!-- Toggle for extra rows -->
-          <div class="touch-keyboard-row">
-            <button
-              class="touch-key wide"
-              @click=${this.toggleExtraRows}
-              title="${this.showExtraKeyRows ? 'Hide' : 'Show'} extra keys"
-            >
-              ${this.showExtraKeyRows ? '▲ Less' : '▼ More'}
-            </button>
-          </div>
-        </div>
-      ` : nothing}
+                <!-- Toggle for extra rows -->
+                <div class="touch-keyboard-row">
+                  <button
+                    class="touch-key wide"
+                    @click=${this.toggleExtraRows}
+                    title="${this.showExtraKeyRows ? 'Hide' : 'Show'} extra keys"
+                  >
+                    ${this.showExtraKeyRows ? '▲ Less' : '▼ More'}
+                  </button>
+                </div>
+              </div>
+            `
+          : nothing
+      }
     `;
   }
 
@@ -2048,107 +2510,184 @@ export class LitShellTerminal extends LitElement {
       <div class="status-bar">
         <div class="status-bar-left">
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-          <span>${this.connected
-            ? (this.sessionActive ? 'Session active' : 'Connected')
-            : 'Disconnected'}</span>
-          ${this.sessionInfo ? html`
-            <span style="color: var(--ls-text-muted)">|</span>
-            <span>${this.sessionInfo.container || this.sessionInfo.shell}</span>
-            <span style="color: var(--ls-text-muted)">${this.sessionInfo.cols}x${this.sessionInfo.rows}</span>
-          ` : nothing}
+          <span
+            >${
+              this.connected
+                ? this.sessionActive
+                  ? 'Session active'
+                  : 'Connected'
+                : 'Disconnected'
+            }</span
+          >
+          ${
+            this.sessionInfo
+              ? html`
+                  <span style="color: var(--ls-text-muted)">|</span>
+                  <span
+                    >${this.sessionInfo.container || this.sessionInfo.shell}</span
+                  >
+                  <span style="color: var(--ls-text-muted)"
+                    >${this.sessionInfo.cols}x${this.sessionInfo.rows}</span
+                  >
+                `
+              : nothing
+          }
         </div>
         <div class="status-bar-right">
-          ${this.statusMessage ? html`
-            <span class="${this.statusType === 'error' ? 'status-bar-error' : this.statusType === 'success' ? 'status-bar-success' : ''}">
-              ${this.statusType === 'error' ? '⚠️' : this.statusType === 'success' ? '✓' : ''}
-              ${this.statusMessage}
-            </span>
-            <button
-              style="background: none; border: none; cursor: pointer; padding: 0; font-size: 10px;"
-              @click=${this.clearStatus}
-              title="Dismiss"
-            >✕</button>
-          ` : nothing}
+          ${
+            this.statusMessage
+              ? html`
+                  <span
+                    class="${this.statusType === 'error' ? 'status-bar-error' : this.statusType === 'success' ? 'status-bar-success' : ''}"
+                  >
+                    ${this.statusType === 'error' ? '⚠️' : this.statusType === 'success' ? '✓' : ''}
+                    ${this.statusMessage}
+                  </span>
+                  <button
+                    style="background: none; border: none; cursor: pointer; padding: 0; font-size: 10px;"
+                    @click=${this.clearStatus}
+                    title="Dismiss"
+                  >
+                    ✕
+                  </button>
+                `
+              : nothing
+          }
         </div>
       </div>
     `;
   }
 
-  override render() {
+  override render(): TemplateResult {
     return html`
-      ${this.noHeader
-        ? nothing
-        : html`
-            <div class="header">
-              <div class="header-title">
-                <span>Terminal</span>
-                ${this.sessionInfo
-                  ? html`<span style="font-weight: normal; font-size: 12px; color: var(--ls-text-muted)">
-                      ${this.sessionInfo.container
-                        ? `${this.sessionInfo.container} (${this.sessionInfo.shell})`
-                        : this.sessionInfo.shell}
-                    </span>`
-                  : nothing}
-              </div>
-              <div class="header-actions">
-                ${!this.showConnectionPanel ? html`
-                  ${!this.connected
-                    ? html`<button @click=${this.connect} ?disabled=${this.loading}>
-                        ${this.loading ? 'Connecting...' : 'Connect'}
-                      </button>`
-                    : !this.sessionActive
-                    ? html`<button @click=${() => this.spawn()} ?disabled=${this.loading}>
-                        ${this.loading ? 'Spawning...' : 'Start'}
-                      </button>`
-                    : html`<button @click=${this.kill}>Stop</button>`}
-                ` : nothing}
-                <button @click=${this.clear} ?disabled=${!this.sessionActive}>Clear</button>
-                ${this.renderSettingsDropdown()}
-                ${!this.showStatusBar ? html`
-                  <div class="status">
-                    <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-                    <span>${this.connected ? 'Connected' : 'Disconnected'}</span>
+      <div class="shell">
+        ${
+          this.noHeader
+            ? nothing
+            : html`
+                <div class="header">
+                  <div class="header-title">
+                    <span>Terminal</span>
+                    ${
+                      this.sessionInfo
+                        ? html`<span
+                            style="font-weight: normal; font-size: 12px; color: var(--ls-text-muted)"
+                          >
+                            ${
+                              this.sessionInfo.container
+                                ? `${this.sessionInfo.container} (${this.sessionInfo.shell})`
+                                : this.sessionInfo.shell
+                            }
+                          </span>`
+                        : nothing
+                    }
                   </div>
-                ` : nothing}
-              </div>
-            </div>
-          `}
-
-      ${this.renderConnectionPanel()}
-      ${this.renderTabBar()}
-
-      ${this.showTabs && this.tabs.length > 0
-        ? html`
-            <div class="terminals-wrapper">
-              ${this.tabs.map(
-                (tab) => html`
-                  <div
-                    class="tab-terminal-container ${tab.id === this.activeTabId ? 'active' : ''}"
-                    data-tab-id=${tab.id}
-                  >
-                    ${this.loading && tab.id === this.activeTabId && !tab.terminal
-                      ? html`<div class="loading"><span class="loading-spinner">⏳</span> Loading...</div>`
-                      : this.error && tab.id === this.activeTabId && !tab.terminal
-                      ? html`<div class="error">❌ ${this.error}</div>`
-                      : nothing}
+                  <div class="header-actions">
+                    ${
+                      !this.showConnectionPanel
+                        ? html`
+                            ${
+                              !this.connected
+                                ? html`<button
+                                    @click=${this.connect}
+                                    ?disabled=${this.loading}
+                                  >
+                                    ${this.loading ? 'Connecting...' : 'Connect'}
+                                  </button>`
+                                : !this.sessionActive
+                                  ? html`<button
+                                      @click=${() => this.spawn()}
+                                      ?disabled=${this.loading}
+                                    >
+                                      ${this.loading ? 'Spawning...' : 'Start'}
+                                    </button>`
+                                  : html`<button @click=${this.kill}>
+                                      Stop
+                                    </button>`
+                            }
+                          `
+                        : nothing
+                    }
+                    <button
+                      @click=${this.clear}
+                      ?disabled=${!this.sessionActive}
+                    >
+                      Clear
+                    </button>
+                    ${this.renderSettingsDropdown()}
+                    ${
+                      !this.showStatusBar
+                        ? html`
+                            <div class="status">
+                              <span
+                                class="status-dot ${this.connected ? 'connected' : ''}"
+                              ></span>
+                              <span
+                                >${this.connected ? 'Connected' : 'Disconnected'}</span
+                              >
+                            </div>
+                          `
+                        : nothing
+                    }
                   </div>
-                `
-              )}
-            </div>
-          `
-        : html`
-            <div class="terminal-container">
-              ${this.loading && !this.terminal
-                ? html`<div class="loading"><span class="loading-spinner">⏳</span> Loading...</div>`
-                : this.error && !this.terminal
-                ? html`<div class="error">❌ ${this.error}</div>`
-                : nothing}
-            </div>
-          `}
-
-      ${this.renderStatusBar()}
-      ${this.renderTouchKeyboard()}
-      ${this.renderReconnectDialog()}
+                </div>
+              `
+        }
+        ${this.renderConnectionPanel()} ${this.renderTabBar()}
+        ${
+          this.showTabs && this.tabs.length > 0
+            ? html`
+                <div class="terminals-wrapper">
+                  ${repeat(
+                    this.tabs,
+                    (tab) => tab.id,
+                    (tab) => html`
+                      <div
+                        class="tab-terminal-container ${tab.id === this.activeTabId ? 'active' : ''}"
+                        id="panel-${tab.id}"
+                        data-tab-id=${tab.id}
+                        role="tabpanel"
+                        aria-labelledby="tab-${tab.id}"
+                        ?hidden=${tab.id !== this.activeTabId}
+                      >
+                        <div class="xterm-mount"></div>
+                        ${
+                          this.loading &&
+                          tab.id === this.activeTabId &&
+                          !tab.terminal
+                            ? html`<div class="loading">
+                                <span class="loading-spinner">⏳</span>
+                                Loading...
+                              </div>`
+                            : this.error &&
+                                tab.id === this.activeTabId &&
+                                !tab.terminal
+                              ? html`<div class="error">❌ ${this.error}</div>`
+                              : nothing
+                        }
+                      </div>
+                    `,
+                  )}
+                </div>
+              `
+            : html`
+                <div class="terminal-container">
+                  <div class="xterm-mount"></div>
+                  ${
+                    this.loading && !this.terminal
+                      ? html`<div class="loading">
+                          <span class="loading-spinner">⏳</span> Loading...
+                        </div>`
+                      : this.error && !this.terminal
+                        ? html`<div class="error">❌ ${this.error}</div>`
+                        : nothing
+                  }
+                </div>
+              `
+        }
+        ${this.renderStatusBar()} ${this.renderTouchKeyboard()}
+        ${this.renderReconnectDialog()}
+      </div>
     `;
   }
 }

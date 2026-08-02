@@ -7,7 +7,7 @@
 
 export class CircularBuffer {
   private buffer: string[] = [];
-  private maxSize: number;
+  private readonly maxSize: number;
   private currentSize = 0;
 
   /**
@@ -15,6 +15,11 @@ export class CircularBuffer {
    * @param maxSize Maximum size in characters
    */
   constructor(maxSize: number) {
+    if (!Number.isSafeInteger(maxSize) || maxSize < 0) {
+      throw new RangeError(
+        'CircularBuffer capacity must be a non-negative integer',
+      );
+    }
     this.maxSize = maxSize;
   }
 
@@ -29,17 +34,23 @@ export class CircularBuffer {
     this.buffer.push(data);
     this.currentSize += data.length;
 
-    // Trim from front if over capacity
-    while (this.currentSize > this.maxSize && this.buffer.length > 1) {
-      const removed = this.buffer.shift()!;
-      this.currentSize -= removed.length;
-    }
+    // Remove exactly the overflow, including a prefix of the oldest chunk.
+    // Dropping whole chunks here would retain less history than the configured
+    // capacity whenever the boundary lands in the middle of a chunk.
+    let overflow = this.currentSize - this.maxSize;
+    while (overflow > 0) {
+      const oldest = this.buffer[0];
+      if (oldest === undefined) break;
 
-    // Handle edge case: single chunk larger than maxSize
-    if (this.buffer.length === 1 && this.currentSize > this.maxSize) {
-      const chunk = this.buffer[0];
-      this.buffer[0] = chunk.slice(-this.maxSize);
-      this.currentSize = this.buffer[0].length;
+      if (oldest.length <= overflow) {
+        this.buffer.shift();
+        this.currentSize -= oldest.length;
+        overflow -= oldest.length;
+      } else {
+        this.buffer[0] = oldest.slice(overflow);
+        this.currentSize -= overflow;
+        overflow = 0;
+      }
     }
   }
 
@@ -50,8 +61,10 @@ export class CircularBuffer {
    */
   toString(limit?: number): string {
     const content = this.buffer.join('');
-    if (limit && limit > 0 && content.length > limit) {
-      return content.slice(-limit);
+    if (limit !== undefined) {
+      if (!Number.isFinite(limit) || limit >= content.length) return content;
+      if (limit <= 0) return '';
+      return content.slice(-Math.floor(limit));
     }
     return content;
   }

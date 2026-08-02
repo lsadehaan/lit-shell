@@ -1,5 +1,10 @@
 # Project Status: lit-shell.js
 
+> [!IMPORTANT]
+> This is a historical January 2026 assessment retained for context, not the
+> current project status. See [README.md](README.md), [roadmap.md](roadmap.md),
+> and the checked-in CI workflows for the maintained source of truth.
+
 **Version:** 0.1.3
 **Last Updated:** January 11, 2026
 **Assessment Date:** January 11, 2026

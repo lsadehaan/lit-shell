@@ -1,5 +1,5 @@
 /**
  * lit-shell.js version
- * This is automatically kept in sync with package.json
+ * Checked and updated by scripts/sync-versions.js.
  */
 export const VERSION = '1.2.1';

@@ -22,9 +22,8 @@ describe('CircularBuffer', () => {
     buffer.append('12345');
     buffer.append('67890');
     buffer.append('ABCDE');
-    // Should keep most recent data within capacity
-    expect(buffer.size()).toBeLessThanOrEqual(10);
-    expect(buffer.toString()).toContain('ABCDE');
+    expect(buffer.size()).toBe(10);
+    expect(buffer.toString()).toBe('67890ABCDE');
   });
 
   it('should handle single chunk larger than capacity', () => {
@@ -38,6 +37,9 @@ describe('CircularBuffer', () => {
     const buffer = new CircularBuffer(100);
     buffer.append('hello world this is a test');
     expect(buffer.toString(5)).toBe(' test');
+    expect(buffer.toString(0)).toBe('');
+    expect(buffer.toString(-1)).toBe('');
+    expect(buffer.toString(Infinity)).toBe('hello world this is a test');
   });
 
   it('should return tail correctly', () => {
@@ -73,5 +75,17 @@ describe('CircularBuffer', () => {
     buffer.append('');
     expect(buffer.size()).toBe(0);
     expect(buffer.isEmpty()).toBe(true);
+  });
+
+  it('should support a zero-capacity buffer', () => {
+    const buffer = new CircularBuffer(0);
+    buffer.append('discarded');
+    expect(buffer.toString()).toBe('');
+    expect(buffer.size()).toBe(0);
+  });
+
+  it('should reject invalid capacities', () => {
+    expect(() => new CircularBuffer(-1)).toThrow(RangeError);
+    expect(() => new CircularBuffer(1.5)).toThrow(RangeError);
   });
 });

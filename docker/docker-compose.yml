@@ -1,41 +1,75 @@
-# lit-shell.js Docker Compose Demo
-#
-# This demo includes:
-# - lit-shell server with Docker exec support
-# - Test containers to exec into
-#
-# Usage:
-#   docker compose up -d
-#   Open http://localhost:3000
+# This demo grants the terminal service access to the Docker daemon. Treat that
+# socket as host-root access and never expose this unauthenticated stack publicly.
 
 services:
-  # lit-shell terminal server
   lit-shell:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    init: true
     ports:
-      - "3000:3000"
+      - '127.0.0.1:${LIT_SHELL_PORT:-3000}:3000'
     volumes:
-      # Mount Docker socket for container exec
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - NODE_ENV=production
+      HOST: 0.0.0.0
+      LIT_SHELL_ALLOWED_ORIGINS: '${LIT_SHELL_ALLOWED_ORIGINS:-http://127.0.0.1:${LIT_SHELL_PORT:-3000},http://localhost:${LIT_SHELL_PORT:-3000}}'
+      LIT_SHELL_VERBOSE: 'false'
+      NODE_ENV: production
+      PORT: 3000
+    # Set DOCKER_GID to the host socket's group ID when it isn't 999:
+    # export DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
+    group_add:
+      - '${DOCKER_GID:-999}'
     depends_on:
-      - alpine-container
-      - ubuntu-container
+      alpine-container:
+        condition: service_healthy
+      ubuntu-container:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    stop_grace_period: 10s
 
-  # Test container - Alpine Linux
   alpine-container:
-    image: alpine:latest
+    image: alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
     container_name: test-alpine
-    command: sleep infinity
+    command: ['sleep', 'infinity']
+    user: '65534:65534'
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'test', '-r', '/etc/alpine-release']
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped
 
-  # Test container - Ubuntu
   ubuntu-container:
-    image: ubuntu:22.04
+    image: ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
     container_name: test-ubuntu
-    command: sleep infinity
+    command: ['sleep', 'infinity']
+    user: '65534:65534'
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'test', '-r', '/etc/os-release']
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped

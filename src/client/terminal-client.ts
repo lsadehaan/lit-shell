@@ -1,171 +1,200 @@
 /**
- * Terminal client for connecting to lit-shell server
- *
- * Example usage:
- * ```typescript
- * import { TerminalClient } from 'lit-shell.js/client';
- *
- * const client = new TerminalClient({ url: 'ws://localhost:3000/terminal' });
- * await client.connect();
- *
- * client.onData((data) => console.log(data));
- * client.onExit((code) => console.log('Exited with code:', code));
- *
- * await client.spawn({ shell: '/bin/bash', cwd: '/home/user' });
- * client.write('ls -la\n');
- * client.resize(120, 40);
- * client.kill();
- *
- * // Session multiplexing example
- * const sessions = await client.listSessions();
- * if (sessions.length > 0) {
- *   await client.join({ sessionId: sessions[0].sessionId, requestHistory: true });
- * }
- * ```
+ * Browser WebSocket client for lit-shell.js.
  */
 
 import type {
   ClientConfig,
-  TerminalOptions,
-  TerminalMessage,
-  SessionInfo,
   ContainerInfo,
-  ServerInfo,
-  SharedSessionInfo,
-  SessionListFilter,
   JoinSessionOptions,
+  MessageType,
+  ServerInfo,
+  SessionInfo,
+  SessionListFilter,
+  SharedSessionInfo,
+  TerminalMessage,
+  TerminalOptions,
 } from '../shared/types.js';
 
-/**
- * Connection state
- */
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
 
+type Handler<Arguments extends unknown[]> = (...arguments_: Arguments) => void;
+
+interface PendingRequest<Result = unknown> {
+  expectedType: MessageType;
+  resolve: (result: Result) => void;
+  reject: (error: Error) => void;
+  transform: (message: TerminalMessage) => Result;
+}
+
+interface WireSharedSessionInfo extends Omit<SharedSessionInfo, 'createdAt'> {
+  createdAt: string | Date;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeSharedSession(
+  session: WireSharedSessionInfo,
+): SharedSessionInfo {
+  const createdAt =
+    session.createdAt instanceof Date
+      ? session.createdAt
+      : new Date(session.createdAt);
+
+  if (Number.isNaN(createdAt.getTime())) {
+    throw new Error(
+      `Invalid session creation date: ${String(session.createdAt)}`,
+    );
+  }
+
+  return { ...session, createdAt };
+}
+
 /**
- * Terminal client class with session multiplexing support
+ * A stateful client that owns at most one active terminal session.
+ *
+ * Request/response operations are correlated by `requestId`, so concurrent
+ * session-list requests and out-of-order responses remain independent.
  */
 export class TerminalClient {
-  private config: Required<ClientConfig>;
+  private readonly config: Required<ClientConfig>;
   private ws: WebSocket | null = null;
   private state: ConnectionState = 'disconnected';
+  private connectPromise: Promise<void> | null = null;
   private sessionId: string | null = null;
   private sessionInfo: SessionInfo | null = null;
   private serverInfo: ServerInfo | null = null;
   private reconnectAttempts = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private previousSessionId: string | null = null;
+  private resumeToken: string | null = null;
+  private previousResumeToken: string | null = null;
   private isReconnecting = false;
+  private manualDisconnect = false;
+  private requestSequence = 0;
 
-  // Event handlers
-  private connectHandlers: (() => void)[] = [];
-  private disconnectHandlers: (() => void)[] = [];
-  private dataHandlers: ((data: string) => void)[] = [];
-  private exitHandlers: ((code: number) => void)[] = [];
-  private errorHandlers: ((error: Error) => void)[] = [];
-  private spawnedHandlers: ((info: SessionInfo) => void)[] = [];
-  private serverInfoHandlers: ((info: ServerInfo) => void)[] = [];
-  private containerListHandlers: ((containers: ContainerInfo[]) => void)[] = [];
-  // Session multiplexing handlers
-  private sessionListHandlers: ((sessions: SharedSessionInfo[]) => void)[] = [];
-  private joinedHandlers: ((session: SharedSessionInfo, history?: string) => void)[] = [];
-  private leftHandlers: ((sessionId: string) => void)[] = [];
-  private clientJoinedHandlers: ((sessionId: string, clientCount: number) => void)[] = [];
-  private clientLeftHandlers: ((sessionId: string, clientCount: number) => void)[] = [];
-  private sessionClosedHandlers: ((sessionId: string, reason: string) => void)[] = [];
-  private reconnectWithSessionHandlers: ((sessionId: string) => void)[] = [];
+  private readonly pendingRequests = new Map<string, PendingRequest>();
 
-  // Promise resolvers for spawn/join
-  private spawnResolve: ((info: SessionInfo) => void) | null = null;
-  private spawnReject: ((error: Error) => void) | null = null;
-  private joinResolve: ((info: SharedSessionInfo) => void) | null = null;
-  private joinReject: ((error: Error) => void) | null = null;
-  private listSessionsResolve: ((sessions: SharedSessionInfo[]) => void) | null = null;
+  private readonly connectHandlers: Handler<[]>[] = [];
+  private readonly disconnectHandlers: Handler<[]>[] = [];
+  private readonly dataHandlers: Handler<[string]>[] = [];
+  private readonly exitHandlers: Handler<[number]>[] = [];
+  private readonly errorHandlers: Handler<[Error]>[] = [];
+  private readonly spawnedHandlers: Handler<[SessionInfo]>[] = [];
+  private readonly serverInfoHandlers: Handler<[ServerInfo]>[] = [];
+  private readonly containerListHandlers: Handler<[ContainerInfo[]]>[] = [];
+  private readonly sessionListHandlers: Handler<[SharedSessionInfo[]]>[] = [];
+  private readonly joinedHandlers: Handler<[SharedSessionInfo, string?]>[] = [];
+  private readonly leftHandlers: Handler<[string]>[] = [];
+  private readonly clientJoinedHandlers: Handler<[string, number]>[] = [];
+  private readonly clientLeftHandlers: Handler<[string, number]>[] = [];
+  private readonly sessionClosedHandlers: Handler<[string, string]>[] = [];
+  private readonly reconnectWithSessionHandlers: Handler<[string]>[] = [];
 
   constructor(config: ClientConfig) {
     this.config = {
       url: config.url,
       reconnect: config.reconnect ?? true,
       maxReconnectAttempts: config.maxReconnectAttempts ?? 10,
-      reconnectDelay: config.reconnectDelay ?? 1000,
+      reconnectDelay: config.reconnectDelay ?? 1_000,
     };
   }
 
-  /**
-   * Connect to the terminal server
-   */
+  /** Connect to the configured terminal server. */
   connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (this.state === 'connected') {
-        resolve();
-        return;
-      }
+    if (this.state === 'connected') return Promise.resolve();
+    if (this.connectPromise) return this.connectPromise;
 
-      this.state = 'connecting';
+    this.manualDisconnect = false;
+    this.state = 'connecting';
 
-      try {
-        this.ws = new WebSocket(this.config.url);
-      } catch (error) {
-        this.state = 'disconnected';
-        reject(error);
-        return;
-      }
-
-      this.ws.onopen = () => {
-        this.state = 'connected';
-        this.reconnectAttempts = 0;
-        this.connectHandlers.forEach((handler) => handler());
-
-        // Check for previous session on reconnect
-        if (this.isReconnecting && this.previousSessionId) {
-          this.checkPreviousSessionAndNotify();
-        }
-        this.isReconnecting = false;
-
-        resolve();
-      };
-
-      this.ws.onclose = () => {
-        const wasConnected = this.state === 'connected';
-        this.state = 'disconnected';
-
-        // Save previous session ID before clearing (for reconnect dialog)
-        if (this.sessionId) {
-          this.previousSessionId = this.sessionId;
-        }
-        this.sessionId = null;
-        this.sessionInfo = null;
-
-        if (wasConnected) {
-          this.disconnectHandlers.forEach((handler) => handler());
-        }
-
-        // Attempt reconnection
-        if (this.config.reconnect && this.reconnectAttempts < this.config.maxReconnectAttempts) {
-          this.isReconnecting = true;
-          this.scheduleReconnect();
-        }
-      };
-
-      this.ws.onerror = (event) => {
-        const error = new Error('WebSocket error');
-        this.errorHandlers.forEach((handler) => handler(error));
-
-        if (this.state === 'connecting') {
-          reject(error);
-        }
-      };
-
-      this.ws.onmessage = (event) => {
-        this.handleMessage(event.data);
-      };
+    let resolveConnection!: () => void;
+    let rejectConnection!: (error: Error) => void;
+    const connection = new Promise<void>((resolve, reject) => {
+      resolveConnection = resolve;
+      rejectConnection = reject;
     });
+    this.connectPromise = connection;
+
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(this.config.url);
+      this.ws = socket;
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      this.state = 'disconnected';
+      this.connectPromise = null;
+      rejectConnection(error);
+      return connection;
+    }
+
+    socket.onopen = () => {
+      if (this.ws !== socket) return;
+
+      this.state = 'connected';
+      this.connectPromise = null;
+      this.reconnectAttempts = 0;
+      resolveConnection();
+      this.emit(this.connectHandlers);
+
+      if (this.isReconnecting && this.previousSessionId) {
+        void this.checkPreviousSessionAndNotify();
+      }
+      this.isReconnecting = false;
+    };
+
+    socket.onclose = () => {
+      if (this.ws !== socket) return;
+
+      const previousState = this.state;
+      const shouldReconnect =
+        !this.manualDisconnect &&
+        this.config.reconnect &&
+        this.reconnectAttempts < this.config.maxReconnectAttempts;
+
+      this.ws = null;
+      this.state = 'disconnected';
+      this.connectPromise = null;
+
+      if (this.sessionId) {
+        this.previousSessionId = this.sessionId;
+        this.previousResumeToken = this.resumeToken;
+      }
+      this.clearActiveSession();
+
+      const closeError = new Error('WebSocket connection closed');
+      this.rejectPendingRequests(closeError);
+
+      if (previousState === 'connecting') rejectConnection(closeError);
+      if (previousState !== 'disconnected') this.emit(this.disconnectHandlers);
+
+      if (shouldReconnect) {
+        this.isReconnecting = true;
+        this.scheduleReconnect();
+      }
+    };
+
+    socket.onerror = () => {
+      const error = new Error('WebSocket error');
+      this.emit(this.errorHandlers, error);
+      if (this.ws === socket && this.state === 'connecting') {
+        this.state = 'disconnected';
+        this.connectPromise = null;
+        rejectConnection(error);
+      }
+    };
+
+    socket.onmessage = (event) => {
+      this.handleMessage(event.data);
+    };
+
+    return connection;
   }
 
-  /**
-   * Disconnect from the terminal server
-   */
+  /** Disconnect without changing the configured reconnect policy. */
   disconnect(): void {
-    this.config.reconnect = false; // Prevent auto-reconnect
+    this.manualDisconnect = true;
 
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
@@ -174,49 +203,130 @@ export class TerminalClient {
 
     if (this.ws) {
       this.ws.close();
-      this.ws = null;
-    }
-
-    this.state = 'disconnected';
-    this.sessionId = null;
-    this.sessionInfo = null;
-  }
-
-  /**
-   * Schedule a reconnection attempt
-   */
-  private scheduleReconnect(): void {
-    if (this.reconnectTimeout) return;
-
-    const delay = this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-    const maxDelay = 30000; // 30 seconds max
-
-    this.reconnectTimeout = setTimeout(() => {
-      this.reconnectTimeout = null;
-      this.reconnectAttempts++;
-      this.connect().catch(() => {
-        // Error handled by onclose
-      });
-    }, Math.min(delay, maxDelay));
-  }
-
-  /**
-   * Handle incoming message
-   */
-  private handleMessage(data: string): void {
-    let message: TerminalMessage;
-
-    try {
-      message = JSON.parse(data);
-    } catch {
-      console.error('[lit-shell] Invalid message:', data);
       return;
     }
 
+    if (this.state !== 'disconnected') {
+      this.state = 'disconnected';
+      this.rejectPendingRequests(new Error('Client disconnected'));
+      this.emit(this.disconnectHandlers);
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimeout) return;
+
+    const delay = Math.min(
+      this.config.reconnectDelay * 2 ** this.reconnectAttempts,
+      30_000,
+    );
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnectTimeout = null;
+      this.reconnectAttempts += 1;
+      void this.connect().catch(() => {
+        // `onclose` owns retry scheduling; error handlers receive the cause.
+      });
+    }, delay);
+  }
+
+  private nextRequestId(): string {
+    this.requestSequence += 1;
+    return `request-${Date.now()}-${this.requestSequence}`;
+  }
+
+  private request<Result>(
+    message: Record<string, unknown>,
+    expectedType: MessageType,
+    transform: (response: TerminalMessage) => Result,
+  ): Promise<Result> {
+    if (this.state !== 'connected' || !this.ws) {
+      return Promise.reject(new Error('Not connected to server'));
+    }
+
+    const requestId = this.nextRequestId();
+    return new Promise<Result>((resolve, reject) => {
+      this.pendingRequests.set(requestId, {
+        expectedType,
+        resolve: resolve as (result: unknown) => void,
+        reject,
+        transform: transform,
+      });
+
+      try {
+        this.ws?.send(JSON.stringify({ ...message, requestId }));
+      } catch (cause) {
+        this.pendingRequests.delete(requestId);
+        reject(cause instanceof Error ? cause : new Error(String(cause)));
+      }
+    });
+  }
+
+  private resolvePending(message: TerminalMessage): void {
+    const requestId = message.requestId;
+    let pendingId = requestId;
+    let pending = requestId ? this.pendingRequests.get(requestId) : undefined;
+
+    // Compatibility for servers that predate request correlation. Only the
+    // oldest matching request is settled, preserving deterministic behavior.
+    if (!pending && !requestId) {
+      for (const [candidateId, candidate] of this.pendingRequests) {
+        if (
+          message.type === 'error' ||
+          candidate.expectedType === message.type
+        ) {
+          pendingId = candidateId;
+          pending = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!pending || !pendingId) return;
+    if (message.type !== 'error' && pending.expectedType !== message.type)
+      return;
+
+    this.pendingRequests.delete(pendingId);
+    if (message.type === 'error') {
+      pending.reject(new Error(message.error));
+      return;
+    }
+
+    try {
+      pending.resolve(pending.transform(message));
+    } catch (cause) {
+      pending.reject(cause instanceof Error ? cause : new Error(String(cause)));
+    }
+  }
+
+  private rejectPendingRequests(error: Error): void {
+    const pending = [...this.pendingRequests.values()];
+    this.pendingRequests.clear();
+    for (const request of pending) request.reject(error);
+  }
+
+  private handleMessage(data: unknown): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(String(data));
+    } catch {
+      this.emit(this.errorHandlers, new Error('Server sent invalid JSON'));
+      return;
+    }
+
+    if (!isRecord(parsed) || typeof parsed.type !== 'string') {
+      this.emit(
+        this.errorHandlers,
+        new Error('Server sent an invalid message'),
+      );
+      return;
+    }
+
+    const message = parsed as unknown as TerminalMessage;
+
     switch (message.type) {
-      case 'spawned':
-        this.sessionId = message.sessionId;
-        this.sessionInfo = {
+      case 'spawned': {
+        const info: SessionInfo = {
           sessionId: message.sessionId,
           shell: message.shell,
           cwd: message.cwd,
@@ -225,526 +335,372 @@ export class TerminalClient {
           createdAt: new Date(),
           container: message.container,
         };
-        this.spawnedHandlers.forEach((handler) => handler(this.sessionInfo!));
-        if (this.spawnResolve) {
-          this.spawnResolve(this.sessionInfo);
-          this.spawnResolve = null;
-          this.spawnReject = null;
-        }
+        this.sessionId = info.sessionId;
+        this.sessionInfo = info;
+        this.resumeToken = message.resumeToken ?? null;
+        this.previousSessionId = null;
+        this.previousResumeToken = null;
+        this.resolvePending(message);
+        this.emit(this.spawnedHandlers, info);
         break;
+      }
 
       case 'data':
-        this.dataHandlers.forEach((handler) => handler(message.data));
+        if (this.sessionId === message.sessionId) {
+          this.emit(this.dataHandlers, message.data);
+        }
         break;
 
       case 'exit':
-        const exitCode = message.exitCode;
-        this.exitHandlers.forEach((handler) => handler(exitCode));
-        this.sessionId = null;
-        this.sessionInfo = null;
+        if (this.sessionId === message.sessionId) {
+          this.emit(this.exitHandlers, message.exitCode);
+          this.clearActiveSession();
+        }
         break;
 
       case 'error':
-        const error = new Error(message.error);
-        this.errorHandlers.forEach((handler) => handler(error));
-        if (this.spawnReject) {
-          this.spawnReject(error);
-          this.spawnResolve = null;
-          this.spawnReject = null;
-        }
-        if (this.joinReject) {
-          this.joinReject(error);
-          this.joinResolve = null;
-          this.joinReject = null;
-        }
+        this.resolvePending(message);
+        this.emit(this.errorHandlers, new Error(message.error));
         break;
 
       case 'serverInfo':
         this.serverInfo = message.info;
-        this.serverInfoHandlers.forEach((handler) => handler(message.info));
+        this.emit(this.serverInfoHandlers, message.info);
         break;
 
       case 'containerList':
-        this.containerListHandlers.forEach((handler) => handler(message.containers));
+        this.emit(this.containerListHandlers, message.containers);
         break;
 
-      // Session multiplexing messages
-      case 'sessionList':
-        this.sessionListHandlers.forEach((handler) =>
-          handler((message as any).sessions)
-        );
-        if (this.listSessionsResolve) {
-          this.listSessionsResolve((message as any).sessions);
-          this.listSessionsResolve = null;
-        }
+      case 'sessionList': {
+        const sessions = (
+          message.sessions as unknown as WireSharedSessionInfo[]
+        ).map(normalizeSharedSession);
+        const normalized = { ...message, sessions };
+        this.resolvePending(normalized);
+        this.emit(this.sessionListHandlers, sessions);
         break;
+      }
 
-      case 'joined':
-        const joinedSession = (message as any).session as SharedSessionInfo;
-        const history = (message as any).history as string | undefined;
-        this.sessionId = message.sessionId!;
-        this.sessionInfo = {
-          sessionId: joinedSession.sessionId,
-          shell: joinedSession.shell,
-          cwd: joinedSession.cwd,
-          cols: joinedSession.cols,
-          rows: joinedSession.rows,
-          createdAt: joinedSession.createdAt,
-          container: joinedSession.container,
-        };
-        this.joinedHandlers.forEach((handler) => handler(joinedSession, history));
-        if (this.joinResolve) {
-          this.joinResolve(joinedSession);
-          this.joinResolve = null;
-          this.joinReject = null;
-        }
+      case 'joined': {
+        const session = normalizeSharedSession(message.session);
+        const normalized = { ...message, session };
+        this.sessionId = session.sessionId;
+        this.sessionInfo = session;
+        this.resumeToken = message.resumeToken ?? null;
+        this.resolvePending(normalized);
+        this.emit(this.joinedHandlers, session, message.history);
         break;
+      }
 
       case 'left':
-        const leftSessionId = message.sessionId!;
-        if (this.sessionId === leftSessionId) {
-          this.sessionId = null;
-          this.sessionInfo = null;
+        if (this.sessionId === message.sessionId) {
+          this.clearActiveSession();
         }
-        this.leftHandlers.forEach((handler) => handler(leftSessionId));
+        this.emit(this.leftHandlers, message.sessionId);
         break;
 
       case 'clientJoined':
-        this.clientJoinedHandlers.forEach((handler) =>
-          handler(message.sessionId!, (message as any).clientCount)
+        this.emit(
+          this.clientJoinedHandlers,
+          message.sessionId,
+          message.clientCount,
         );
         break;
 
       case 'clientLeft':
-        this.clientLeftHandlers.forEach((handler) =>
-          handler(message.sessionId!, (message as any).clientCount)
+        this.emit(
+          this.clientLeftHandlers,
+          message.sessionId,
+          message.clientCount,
         );
         break;
 
       case 'sessionClosed':
-        const closedSessionId = message.sessionId!;
-        const reason = (message as any).reason as string;
-        if (this.sessionId === closedSessionId) {
-          this.sessionId = null;
-          this.sessionInfo = null;
+        if (this.sessionId === message.sessionId) {
+          this.clearActiveSession();
         }
-        this.sessionClosedHandlers.forEach((handler) =>
-          handler(closedSessionId, reason)
+        this.emit(
+          this.sessionClosedHandlers,
+          message.sessionId,
+          message.reason,
         );
         break;
+
+      default:
+        this.emit(
+          this.errorHandlers,
+          new Error(
+            `Server sent an unknown message type: ${String(parsed.type)}`,
+          ),
+        );
     }
   }
 
-  /**
-   * Spawn a terminal session
-   */
+  /** Spawn a new terminal session. */
   spawn(options: TerminalOptions = {}): Promise<SessionInfo> {
-    return new Promise((resolve, reject) => {
-      if (this.state !== 'connected' || !this.ws) {
-        reject(new Error('Not connected to server'));
-        return;
-      }
-
-      if (this.sessionId) {
-        reject(new Error('Session already active. Call kill() or leave() first.'));
-        return;
-      }
-
-      this.spawnResolve = resolve;
-      this.spawnReject = reject;
-
-      this.ws.send(
-        JSON.stringify({
-          type: 'spawn',
-          options,
-        })
+    if (this.sessionId) {
+      return Promise.reject(
+        new Error('Session already active. Call kill() or leave() first.'),
       );
-    });
+    }
+
+    const secureOptions = { allowJoin: false, ...options };
+    return this.request(
+      { type: 'spawn', options: secureOptions },
+      'spawned',
+      (message) => {
+        if (message.type !== 'spawned')
+          throw new Error('Invalid spawn response');
+        return {
+          sessionId: message.sessionId,
+          shell: message.shell,
+          cwd: message.cwd,
+          cols: message.cols,
+          rows: message.rows,
+          createdAt: new Date(),
+          container: message.container,
+        };
+      },
+    );
   }
 
-  /**
-   * Write data to the terminal
-   */
+  /** Write text to the active terminal. */
   write(data: string): void {
-    if (!this.ws || this.state !== 'connected') {
-      console.error('[lit-shell] Cannot write: not connected');
-      return;
-    }
-
-    if (!this.sessionId) {
-      console.error('[lit-shell] Cannot write: no active session');
-      return;
-    }
-
-    this.ws.send(
-      JSON.stringify({
-        type: 'data',
-        sessionId: this.sessionId,
-        data,
-      })
-    );
+    this.sendForActiveSession({ type: 'data', data });
   }
 
-  /**
-   * Resize the terminal
-   */
+  /** Resize the active terminal. */
   resize(cols: number, rows: number): void {
-    if (!this.ws || this.state !== 'connected') {
-      console.error('[lit-shell] Cannot resize: not connected');
-      return;
-    }
-
-    if (!this.sessionId) {
-      console.error('[lit-shell] Cannot resize: no active session');
-      return;
-    }
-
-    this.ws.send(
-      JSON.stringify({
-        type: 'resize',
-        sessionId: this.sessionId,
-        cols,
-        rows,
-      })
-    );
+    this.sendForActiveSession({ type: 'resize', cols, rows });
   }
 
-  /**
-   * Kill the terminal session (close and terminate)
-   */
+  /** Terminate the active terminal. */
   kill(): void {
+    if (!this.sessionId) return;
+    this.sendForActiveSession({ type: 'close' });
+  }
+
+  private sendForActiveSession(message: Record<string, unknown>): void {
     if (!this.ws || this.state !== 'connected') {
+      this.emit(this.errorHandlers, new Error('Not connected to server'));
       return;
     }
-
     if (!this.sessionId) {
+      this.emit(this.errorHandlers, new Error('No active session'));
       return;
     }
-
-    this.ws.send(
-      JSON.stringify({
-        type: 'close',
-        sessionId: this.sessionId,
-      })
-    );
-
-    this.sessionId = null;
-    this.sessionInfo = null;
+    this.ws.send(JSON.stringify({ ...message, sessionId: this.sessionId }));
   }
 
-  // ==========================================
-  // Session Multiplexing Methods
-  // ==========================================
-
-  /**
-   * List available sessions
-   */
+  /** List sessions available to join. */
   listSessions(filter?: SessionListFilter): Promise<SharedSessionInfo[]> {
-    return new Promise((resolve, reject) => {
-      if (this.state !== 'connected' || !this.ws) {
-        reject(new Error('Not connected to server'));
-        return;
-      }
-
-      this.listSessionsResolve = resolve;
-
-      this.ws.send(
-        JSON.stringify({
-          type: 'listSessions',
-          filter,
-        })
-      );
-    });
-  }
-
-  /**
-   * Join an existing session
-   */
-  join(options: JoinSessionOptions): Promise<SharedSessionInfo> {
-    return new Promise((resolve, reject) => {
-      if (this.state !== 'connected' || !this.ws) {
-        reject(new Error('Not connected to server'));
-        return;
-      }
-
-      if (this.sessionId) {
-        reject(new Error('Already in a session. Call leave() first.'));
-        return;
-      }
-
-      this.joinResolve = resolve;
-      this.joinReject = reject;
-
-      this.ws.send(
-        JSON.stringify({
-          type: 'join',
-          options,
-        })
-      );
-    });
-  }
-
-  /**
-   * Leave the current session without killing it
-   */
-  leave(sessionId?: string): void {
-    if (!this.ws || this.state !== 'connected') {
-      console.error('[lit-shell] Cannot leave: not connected');
-      return;
-    }
-
-    const targetSession = sessionId || this.sessionId;
-    if (!targetSession) {
-      console.error('[lit-shell] Cannot leave: no active session');
-      return;
-    }
-
-    this.ws.send(
-      JSON.stringify({
-        type: 'leave',
-        sessionId: targetSession,
-      })
+    return this.request(
+      { type: 'listSessions', filter },
+      'sessionList',
+      (message) => {
+        if (message.type !== 'sessionList') {
+          throw new Error('Invalid session-list response');
+        }
+        return message.sessions;
+      },
     );
+  }
 
-    if (targetSession === this.sessionId) {
-      this.sessionId = null;
-      this.sessionInfo = null;
+  /** Join an existing session. */
+  join(options: JoinSessionOptions): Promise<SharedSessionInfo> {
+    if (this.sessionId) {
+      return Promise.reject(
+        new Error('Already in a session. Call leave() first.'),
+      );
     }
+
+    const resumeToken =
+      options.resumeToken ??
+      (options.sessionId === this.previousSessionId
+        ? this.previousResumeToken
+        : null);
+    const joinOptions = resumeToken ? { ...options, resumeToken } : options;
+    return this.request(
+      { type: 'join', options: joinOptions },
+      'joined',
+      (message) => {
+        if (message.type !== 'joined') throw new Error('Invalid join response');
+        return message.session;
+      },
+    );
   }
 
-  /**
-   * Request session list and trigger onSessionList handlers
-   * (Fire-and-forget version of listSessions)
-   */
+  /** Leave a session without terminating its PTY. */
+  leave(sessionId = this.sessionId ?? undefined): void {
+    if (!sessionId) {
+      this.emit(this.errorHandlers, new Error('No active session'));
+      return;
+    }
+    if (!this.ws || this.state !== 'connected') {
+      this.emit(this.errorHandlers, new Error('Not connected to server'));
+      return;
+    }
+    this.ws.send(JSON.stringify({ type: 'leave', sessionId }));
+  }
+
+  /** Request a list while notifying `onSessionList` subscribers. */
   requestSessionList(filter?: SessionListFilter): void {
-    this.listSessions(filter)
-      .then((sessions) => {
-        this.sessionListHandlers.forEach((handler) => {
-          try {
-            handler(sessions);
-          } catch (e) {
-            console.error('[lit-shell] Error in sessionList handler:', e);
-          }
-        });
-      })
-      .catch((err) => {
-        console.error('[lit-shell] Failed to list sessions:', err);
-      });
+    void this.listSessions(filter).catch((error: unknown) => {
+      this.emit(
+        this.errorHandlers,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
   }
 
-  // ==========================================
-  // Event handlers
-  // ==========================================
-
-  /**
-   * Called when connected to server
-   */
-  onConnect(handler: () => void): void {
+  onConnect(handler: Handler<[]>): void {
     this.connectHandlers.push(handler);
   }
 
-  /**
-   * Called when disconnected from server
-   */
-  onDisconnect(handler: () => void): void {
+  onDisconnect(handler: Handler<[]>): void {
     this.disconnectHandlers.push(handler);
   }
 
-  /**
-   * Called when data is received from the terminal
-   */
-  onData(handler: (data: string) => void): void {
+  onData(handler: Handler<[string]>): void {
     this.dataHandlers.push(handler);
   }
 
-  /**
-   * Called when the terminal session exits
-   */
-  onExit(handler: (code: number) => void): void {
+  onExit(handler: Handler<[number]>): void {
     this.exitHandlers.push(handler);
   }
 
-  /**
-   * Called when an error occurs
-   */
-  onError(handler: (error: Error) => void): void {
+  onError(handler: Handler<[Error]>): void {
     this.errorHandlers.push(handler);
   }
 
-  /**
-   * Called when a session is spawned
-   */
-  onSpawned(handler: (info: SessionInfo) => void): void {
+  onSpawned(handler: Handler<[SessionInfo]>): void {
     this.spawnedHandlers.push(handler);
   }
 
-  /**
-   * Called when server info is received
-   */
-  onServerInfo(handler: (info: ServerInfo) => void): void {
+  onServerInfo(handler: Handler<[ServerInfo]>): void {
     this.serverInfoHandlers.push(handler);
-    // If we already have server info, call immediately
-    if (this.serverInfo) {
-      handler(this.serverInfo);
-    }
+    if (this.serverInfo) this.emit([handler], this.serverInfo);
   }
 
-  /**
-   * Called when container list is received
-   */
-  onContainerList(handler: (containers: ContainerInfo[]) => void): void {
+  onContainerList(handler: Handler<[ContainerInfo[]]>): void {
     this.containerListHandlers.push(handler);
   }
 
-  /**
-   * Called when session list is received
-   */
-  onSessionList(handler: (sessions: SharedSessionInfo[]) => void): void {
+  onSessionList(handler: Handler<[SharedSessionInfo[]]>): void {
     this.sessionListHandlers.push(handler);
   }
 
-  /**
-   * Called when successfully joined a session
-   */
-  onJoined(handler: (session: SharedSessionInfo, history?: string) => void): void {
+  onJoined(handler: Handler<[SharedSessionInfo, string?]>): void {
     this.joinedHandlers.push(handler);
   }
 
-  /**
-   * Called when left a session
-   */
-  onLeft(handler: (sessionId: string) => void): void {
+  onLeft(handler: Handler<[string]>): void {
     this.leftHandlers.push(handler);
   }
 
-  /**
-   * Called when another client joins the current session
-   */
-  onClientJoined(handler: (sessionId: string, clientCount: number) => void): void {
+  onClientJoined(handler: Handler<[string, number]>): void {
     this.clientJoinedHandlers.push(handler);
   }
 
-  /**
-   * Called when another client leaves the current session
-   */
-  onClientLeft(handler: (sessionId: string, clientCount: number) => void): void {
+  onClientLeft(handler: Handler<[string, number]>): void {
     this.clientLeftHandlers.push(handler);
   }
 
-  /**
-   * Called when the session is closed by owner or orphan timeout
-   */
-  onSessionClosed(handler: (sessionId: string, reason: string) => void): void {
+  onSessionClosed(handler: Handler<[string, string]>): void {
     this.sessionClosedHandlers.push(handler);
   }
 
-  /**
-   * Request list of available containers
-   */
   requestContainerList(): void {
     if (!this.ws || this.state !== 'connected') {
-      console.error('[lit-shell] Cannot request containers: not connected');
+      this.emit(this.errorHandlers, new Error('Not connected to server'));
       return;
     }
-
     this.ws.send(JSON.stringify({ type: 'listContainers' }));
   }
 
-  // ==========================================
-  // Getters
-  // ==========================================
-
-  /**
-   * Get current connection state
-   */
   getState(): ConnectionState {
     return this.state;
   }
 
-  /**
-   * Check if connected
-   */
   isConnected(): boolean {
     return this.state === 'connected';
   }
 
-  /**
-   * Get current session ID
-   */
   getSessionId(): string | null {
     return this.sessionId;
   }
 
-  /**
-   * Get current session info
-   */
   getSessionInfo(): SessionInfo | null {
     return this.sessionInfo;
   }
 
-  /**
-   * Check if a session is active
-   */
   hasActiveSession(): boolean {
     return this.sessionId !== null;
   }
 
-  /**
-   * Get server info
-   */
   getServerInfo(): ServerInfo | null {
     return this.serverInfo;
   }
 
-  /**
-   * Get previous session ID (available after disconnect)
-   */
   getPreviousSessionId(): string | null {
     return this.previousSessionId;
   }
 
-  /**
-   * Clear previous session ID (call after user declines to rejoin)
-   */
   clearPreviousSessionId(): void {
     this.previousSessionId = null;
+    this.previousResumeToken = null;
   }
 
-  /**
-   * Called when reconnected and previous session is available
-   */
-  onReconnectWithSession(handler: (sessionId: string) => void): void {
+  private clearActiveSession(): void {
+    this.sessionId = null;
+    this.sessionInfo = null;
+    this.resumeToken = null;
+  }
+
+  onReconnectWithSession(handler: Handler<[string]>): void {
     this.reconnectWithSessionHandlers.push(handler);
   }
 
-  /**
-   * Check if previous session exists and notify handlers
-   */
   private async checkPreviousSessionAndNotify(): Promise<void> {
-    if (!this.previousSessionId) return;
+    const previousSessionId = this.previousSessionId;
+    if (!previousSessionId) return;
 
     try {
+      if (this.previousResumeToken) {
+        this.emit(this.reconnectWithSessionHandlers, previousSessionId);
+        return;
+      }
       const sessions = await this.listSessions();
-      const previousSession = sessions.find(
-        (s) => s.sessionId === this.previousSessionId
+      const previous = sessions.find(
+        (session) => session.sessionId === previousSessionId,
       );
-
-      if (previousSession && previousSession.accepting) {
-        // Previous session still exists and accepting clients
-        this.reconnectWithSessionHandlers.forEach((handler) => {
-          try {
-            handler(this.previousSessionId!);
-          } catch (e) {
-            console.error('[lit-shell] Error in reconnectWithSession handler:', e);
-          }
-        });
+      if (previous?.accepting) {
+        this.emit(this.reconnectWithSessionHandlers, previousSessionId);
       } else {
-        // Session no longer exists or not accepting
         this.previousSessionId = null;
       }
-    } catch (e) {
-      console.error('[lit-shell] Failed to check previous session:', e);
+    } catch (cause) {
       this.previousSessionId = null;
+      this.emit(
+        this.errorHandlers,
+        cause instanceof Error ? cause : new Error(String(cause)),
+      );
+    }
+  }
+
+  private emit<Arguments extends unknown[]>(
+    handlers: readonly Handler<Arguments>[],
+    ...arguments_: Arguments
+  ): void {
+    for (const handler of [...handlers]) {
+      try {
+        handler(...arguments_);
+      } catch (cause) {
+        // Consumer callbacks must never interrupt protocol state transitions or
+        // strand promises. Errors remain visible without being re-thrown.
+        console.error('[lit-shell] Event handler failed:', cause);
+      }
     }
   }
 }

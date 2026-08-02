@@ -20,7 +20,7 @@ async function build() {
       bundle: true,
       format: 'esm',
       platform: 'browser',
-      target: ['es2020'],
+      target: ['es2022'],
       outfile: join(rootDir, 'dist/client/browser-bundle.js'),
       sourcemap: true,
       minify: false,
@@ -28,26 +28,22 @@ async function build() {
     });
     console.log('✅ Client bundle: dist/client/browser-bundle.js');
 
-    // Build UI bundle (includes Lit components)
-    // Note: xterm.js is loaded dynamically from CDN, not bundled
+    // Build the complete UI bundle, including Lit and xterm. Keeping browser
+    // dependencies in the artifact makes it deterministic, offline-capable,
+    // and compatible with strict content-security policies.
     console.log('Building UI bundle...');
     await esbuild.build({
       entryPoints: [join(rootDir, 'src/ui/index.ts')],
       bundle: true,
       format: 'esm',
       platform: 'browser',
-      target: ['es2020'],
+      target: ['es2022'],
       outfile: join(rootDir, 'dist/ui/browser-bundle.js'),
       sourcemap: true,
       minify: false,
-      external: [
-        // xterm.js is loaded dynamically from CDN
-        'xterm',
-        'xterm-addon-fit',
-      ],
+      external: [],
     });
     console.log('✅ UI bundle: dist/ui/browser-bundle.js');
-
   } catch (error) {
     console.error('Build failed:', error);
     process.exit(1);

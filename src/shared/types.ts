@@ -11,25 +11,25 @@ export type SessionType = 'local' | 'docker-exec' | 'docker-attach';
  * Terminal spawn options
  */
 export interface TerminalOptions {
-  /** Shell to use (e.g., 'bash', 'zsh', 'cmd.exe', 'powershell.exe') */
+  /** Shell for a local session (use containerShell for Docker exec) */
   shell?: string;
-  /** Working directory */
+  /** Working directory for a local session (use containerCwd for Docker exec) */
   cwd?: string;
-  /** Environment variables */
+  /** Environment variables for local or Docker exec sessions (not attach) */
   env?: Record<string, string>;
-  /** Initial columns (default: 80) */
+  /** Initial columns (default: 80, maximum: 1000) */
   cols?: number;
-  /** Initial rows (default: 24) */
+  /** Initial rows (default: 24, maximum: 1000) */
   rows?: number;
 
   // Docker container support
   /** Docker container ID or name to exec into */
   container?: string;
-  /** Shell to use inside the container (default: /bin/bash) */
+  /** Shell to use for Docker exec (default: /bin/bash) */
   containerShell?: string;
-  /** User to run as inside the container */
+  /** User for Docker exec */
   containerUser?: string;
-  /** Working directory inside the container */
+  /** Working directory for Docker exec */
   containerCwd?: string;
 
   // Session multiplexing options
@@ -37,17 +37,17 @@ export interface TerminalOptions {
   attachMode?: boolean;
   /** Session label for easier identification */
   label?: string;
-  /** Allow other clients to join this session (default: true) */
+  /** Allow other clients to discover and join this session (default: false) */
   allowJoin?: boolean;
   /** Enable history buffer for replay on join (default: true) */
   enableHistory?: boolean;
 
   // Persistence options
-  /** Orphan timeout in ms - how long session lives after all clients disconnect (0 = use server default) */
+  /** Orphan timeout in ms (0 = server default, maximum: 2147483647) */
   orphanTimeout?: number;
-  /** Use tmux for persistent session (survives disconnects indefinitely) */
+  /** Use tmux for a persistent Docker exec session (Docker exec only) */
   useTmux?: boolean;
-  /** tmux session name (default: auto-generated) */
+  /** tmux session name (Docker exec with useTmux only; default: generated) */
   tmuxSession?: string;
 }
 
@@ -57,16 +57,18 @@ export interface TerminalOptions {
 export interface ServerConfig {
   /** Allowed shells (empty = all allowed) */
   allowedShells?: string[];
-  /** Allowed working directories (empty = all allowed) */
+  /** Allowed initial local working directories (empty = all allowed; not a filesystem sandbox) */
   allowedPaths?: string[];
   /** Default shell if not specified by client */
   defaultShell?: string;
   /** Default working directory */
   defaultCwd?: string;
-  /** Maximum concurrent sessions per client */
+  /** Maximum concurrent sessions per client (minimum: 1) */
   maxSessionsPerClient?: number;
   /** Session idle timeout in ms (0 = no timeout) */
   idleTimeout?: number;
+  /** Allow local host PTY sessions (default: true; disable when exposing a Docker socket) */
+  allowLocalExec?: boolean;
 
   // Docker container support
   /** Enable Docker exec feature (default: false) */
@@ -117,6 +119,9 @@ export interface ContainerInfo {
  * Server capabilities info
  */
 export interface ServerInfo {
+  /** Whether the server accepts new local host PTY sessions */
+  localEnabled: boolean;
+  /** Whether the server accepts Docker exec/attach sessions */
   dockerEnabled: boolean;
   allowedShells: string[];
   defaultShell: string;
@@ -128,6 +133,8 @@ export interface ServerInfo {
  */
 export interface BaseMessage {
   type: MessageType;
+  /** Correlates a response or error with the request that caused it. */
+  requestId?: string;
   sessionId?: string;
 }
 
@@ -151,6 +158,8 @@ export interface SpawnedMessage extends BaseMessage {
   rows: number;
   /** Container ID if this is a Docker exec session */
   container?: string;
+  /** Opaque owner capability for resuming this session after reconnecting. */
+  resumeToken?: string;
 }
 
 /**
@@ -312,8 +321,10 @@ export interface JoinSessionOptions {
   sessionId: string;
   /** Request recent output history */
   requestHistory?: boolean;
-  /** Max history characters to retrieve */
+  /** Max history characters to retrieve (up to the server's history size) */
   historyLimit?: number;
+  /** Owner capability returned by spawn; clients normally manage this. */
+  resumeToken?: string;
 }
 
 // =============================================================================
@@ -353,6 +364,8 @@ export interface JoinedMessage extends BaseMessage {
   session: SharedSessionInfo;
   /** Recent output history (if requested) */
   history?: string;
+  /** Re-issued only when the owner resumed with its capability. */
+  resumeToken?: string;
 }
 
 /**
@@ -395,5 +408,11 @@ export interface ClientLeftMessage extends BaseMessage {
 export interface SessionClosedMessage extends BaseMessage {
   type: 'sessionClosed';
   sessionId: string;
-  reason: 'orphan_timeout' | 'owner_closed' | 'process_exit' | 'error';
+  reason:
+    | 'orphan_timeout'
+    | 'owner_closed'
+    | 'process_exit'
+    | 'idle_timeout'
+    | 'cleanup'
+    | 'error';
 }
