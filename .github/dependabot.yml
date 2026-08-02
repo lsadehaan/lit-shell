@@ -104,3 +104,14 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: 'chore(deps)'
+
+  - package-ecosystem: docker
+    directory: '/deploy/remote-shell'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: 'chore(deps)'

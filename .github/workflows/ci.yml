@@ -188,7 +188,10 @@ jobs:
         run: npm ci --ignore-scripts && npm run deps:build
 
       - name: Build browser, server, and Pages artifacts
-        run: npm run build && npm run pages:check
+        run: |
+          npm run build
+          npm run pages:check
+          npm run pages:check:enabled
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium firefox webkit
@@ -463,6 +466,96 @@ jobs:
             --env LIT_SHELL_SMOKE_CONTAINER="$target_name" \
             "$server_name" node tests/docker-protocol-smoke.mjs
 
+  remote-demo-integrity:
+    name: Remote demo sandbox and image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate and build the hardened image
+        run: |
+          docker build --check --file deploy/remote-shell/Dockerfile .
+          docker build --file deploy/remote-shell/Dockerfile \
+            --tag lit-shell-remote-demo-ci .
+          test "$(docker image inspect --format '{{.Config.User}}' \
+            lit-shell-remote-demo-ci)" = '65531:65531'
+
+      - name: Prove a stripped privilege boundary fails closed
+        run: |
+          container_name='lit-shell-remote-demo-negative-ci'
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name "$container_name" \
+            --read-only --security-opt no-new-privileges:true \
+            --env LIT_SHELL_ALLOWED_ORIGIN=https://pages.test \
+            lit-shell-remote-demo-ci
+          for attempt in $(seq 1 20); do
+            status="$(docker inspect --format '{{.State.Status}}' "$container_name")"
+            if [ "$status" = 'exited' ]; then
+              break
+            fi
+            sleep 0.5
+          done
+          test "$(docker inspect --format '{{.State.Status}}' "$container_name")" = exited
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container_name")" -ne 0
+          docker logs "$container_name" 2>&1 \
+            | grep --quiet --fixed-strings 'setuid privilege boundary is unavailable'
+
+      - name: Exercise hostile commands in the real sandbox
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+        run: |
+          container_name='lit-shell-remote-demo-positive-ci'
+          docker run --detach --name "$container_name" \
+            --read-only --tmpfs /tmp:mode=1777,size=8m \
+            --memory 512m --pids-limit 64 --cpus 1 \
+            --health-interval=1s --health-start-period=1s \
+            --env LIT_SHELL_ALLOWED_ORIGIN=https://pages.test \
+            --env LIT_SHELL_HOST_CANARY=gateway-environment-must-not-cross \
+            --env RENDER_GIT_COMMIT="$BUILD_REVISION" \
+            --volume "$PWD/README.md:/outside-canary:ro" \
+            --volume "$PWD/tests/fixtures/remote-demo-container-smoke.mjs:/app/remote-demo-container-smoke.mjs:ro" \
+            lit-shell-remote-demo-ci
+          for attempt in $(seq 1 45); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_name")"
+            if [ "$health" = healthy ]; then
+              break
+            fi
+            if [ "$health" = unhealthy ]; then
+              docker logs "$container_name"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")" = healthy
+          test "$(docker exec "$container_name" \
+            /usr/local/bin/lit-shell-sandbox --self-test)" = \
+            'lit-shell-sandbox-self-test-ok'
+          docker exec \
+            --env LIT_SHELL_SMOKE_ORIGIN=http://127.0.0.1:10000 \
+            "$container_name" node /app/remote-demo-container-smoke.mjs
+
+      - name: Scan the final image for fixed high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lit-shell-remote-demo-ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
+      - name: Report and clean up the runtime container
+        if: ${{ always() }}
+        run: |
+          docker logs lit-shell-remote-demo-positive-ci 2>&1 || true
+          docker rm --force lit-shell-remote-demo-positive-ci \
+            >/dev/null 2>&1 || true
+
   ci-gate:
     name: CI gate
     if: ${{ always() }}
@@ -475,6 +568,7 @@ jobs:
       - python-node-e2e
       - package-integrity
       - container-integrity
+      - remote-demo-integrity
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
@@ -489,6 +583,7 @@ jobs:
           PYTHON_NODE_E2E_RESULT: ${{ needs['python-node-e2e'].result }}
           PACKAGE_INTEGRITY_RESULT: ${{ needs['package-integrity'].result }}
           CONTAINER_INTEGRITY_RESULT: ${{ needs['container-integrity'].result }}
+          REMOTE_DEMO_INTEGRITY_RESULT: ${{ needs['remote-demo-integrity'].result }}
         run: |
           results=(
             "node-compatibility=$NODE_COMPATIBILITY_RESULT"
@@ -499,6 +594,7 @@ jobs:
             "python-node-e2e=$PYTHON_NODE_E2E_RESULT"
             "package-integrity=$PACKAGE_INTEGRITY_RESULT"
             "container-integrity=$CONTAINER_INTEGRITY_RESULT"
+            "remote-demo-integrity=$REMOTE_DEMO_INTEGRITY_RESULT"
           )
           gate_failed=0
           for entry in "${results[@]}"; do
@@ -510,3 +606,111 @@ jobs:
             fi
           done
           exit "$gate_failed"
+
+  remote-demo-production:
+    name: Deploy and smoke test remote demo
+    if: >-
+      ${{
+        github.ref == 'refs/heads/master' &&
+        (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      }}
+    needs: ci-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out the exact reviewed revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Install the locked smoke-test dependency
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Validate the optional production deployment endpoints
+        id: deployment-config
+        env:
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] && [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'Remote demo deployment is not configured; keeping it disabled.'
+            exit 0
+          fi
+          if [ -z "$REMOTE_DEMO_ORIGIN" ] || [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo 'REMOTE_DEMO_ORIGIN and RENDER_DEPLOY_HOOK_URL must be configured together.' >&2
+            exit 1
+          fi
+          node --input-type=module --eval '
+            const origin = new URL(process.env.REMOTE_DEMO_ORIGIN ?? "");
+            if (
+              origin.protocol !== "https:" ||
+              origin.origin !== process.env.REMOTE_DEMO_ORIGIN
+            ) throw new Error("REMOTE_DEMO_ORIGIN must be one exact HTTPS origin");
+            const hook = new URL(process.env.RENDER_DEPLOY_HOOK_URL ?? "");
+            if (
+              hook.protocol !== "https:" ||
+              hook.origin !== "https://api.render.com" ||
+              hook.username ||
+              hook.password ||
+              !hook.pathname.startsWith("/deploy/") ||
+              !hook.searchParams.has("key") ||
+              hook.hash
+            ) throw new Error("RENDER_DEPLOY_HOOK_URL is not a Render deploy hook");
+          '
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
+
+      - name: Trigger deployment of the exact reviewed revision
+        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          case "$RENDER_DEPLOY_HOOK_URL" in
+            *\?*) separator='&' ;;
+            *) separator='?' ;;
+          esac
+          curl --fail-with-body --silent --show-error --max-time 30 \
+            --proto '=https' --request POST --output render-deploy.json \
+            "${RENDER_DEPLOY_HOOK_URL}${separator}ref=${BUILD_REVISION}"
+
+      - name: Wait for the exact backend revision
+        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+        run: |
+          for attempt in $(seq 1 180); do
+            if curl --fail --silent --show-error --max-time 30 \
+              --proto '=https' --output remote-health.json \
+              "$REMOTE_DEMO_ORIGIN/health/live" \
+              && jq --exit-status --arg revision "$BUILD_REVISION" \
+                '.status == "live" and .revision == $revision' \
+                remote-health.json >/dev/null; then
+              exit 0
+            fi
+            if [ "$attempt" = 180 ]; then
+              echo 'The exact remote backend revision did not become live' >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Exercise the live sandbox boundary and quotas
+        if: ${{ steps.deployment-config.outputs.configured == 'true' }}
+        env:
+          LIT_SHELL_EXPECTED_REVISION: ${{ github.sha }}
+          LIT_SHELL_HOST_CANARY: gateway-environment-must-not-cross
+          LIT_SHELL_SMOKE_BROWSER_ORIGIN: https://www.idnteq.net
+          LIT_SHELL_SMOKE_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+        run: node tests/fixtures/remote-demo-container-smoke.mjs

@@ -25,6 +25,13 @@ Node.js 24 is the default for local development and quality automation. The
 repository uses npm and its committed lockfile, so npm is the reference package
 manager for JavaScript dependency changes.
 
+Source development requires npm 11.16 through 11.x because the install-script
+allowlist is a hard supply-chain gate. `packageManager` pins npm 11.19.0. If
+your Node.js installation ships a different npm, run `corepack enable` and
+`corepack install` in the checkout (or install npm 11.19.0 explicitly) before
+`npm ci`. The broader published `engines.npm` range applies to package
+consumers, not repository development.
+
 `node-pty` is a native module. A C/C++ compiler, Python, and the platform tools
 required by `node-gyp` may be needed during installation. See the upstream
 `node-pty` installation documentation for platform-specific requirements.
@@ -32,6 +39,8 @@ required by `node-gyp` may be needed during installation. See the upstream
 ```bash
 git clone https://github.com/lsadehaan/lit-shell.git
 cd lit-shell
+corepack enable
+corepack install
 npm ci
 npm run deps:build
 npm run validate
@@ -72,6 +81,7 @@ Useful commands:
 | `npm run test:coverage`       | Run unit and protocol tests with coverage gates       |
 | `npm run test:e2e:protocol`   | Run the real WebSocket/PTY protocol suite             |
 | `npm run test:e2e:browser`    | Run browser E2E in Chromium, Firefox, and WebKit      |
+| `npm run pages:check:enabled` | Build the network-enabled Pages E2E fixture           |
 | `npm run test:examples`       | Test example HTTP and static-file boundaries          |
 | `npm run test:example-server` | Smoke-test the built multiplexing example             |
 | `npm run test:pty-smoke`      | Spawn a real PTY with the current platform shell      |
@@ -172,6 +182,8 @@ browsers before the first local run:
 ```bash
 npx playwright install --with-deps chromium firefox webkit
 npm run build
+npm run pages:check
+npm run pages:check:enabled
 npm run test:e2e:browser
 ```
 

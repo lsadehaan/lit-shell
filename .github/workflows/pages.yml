@@ -16,8 +16,9 @@ jobs:
     name: Build static demo
     if: ${{ github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
+      checks: read
       contents: read
       pages: read
 
@@ -46,7 +47,93 @@ jobs:
           --strict-allow-scripts=true
           esbuild
 
+      - name: Wait for the exact CI and remote backend revisions
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          wait_for_check() {
+            check_name="$1"
+            max_attempts="$2"
+            for attempt in $(seq 1 "$max_attempts"); do
+              conclusion="$(gh api \
+                "repos/$REPOSITORY/commits/$BUILD_REVISION/check-runs?per_page=100" \
+                --jq "[.check_runs[] | select(.name == \"$check_name\")]
+                  | sort_by(.id) | last | .conclusion // \"pending\"")"
+              case "$conclusion" in
+                success) return ;;
+                pending) ;;
+                *)
+                  echo "$check_name concluded $conclusion for $BUILD_REVISION" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "$attempt" = "$max_attempts" ]; then
+                echo "$check_name did not finish for $BUILD_REVISION" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          }
+          wait_for_check 'CI gate' 180
+          if [ -z "$REMOTE_DEMO_ORIGIN" ]; then
+            exit 0
+          fi
+          wait_for_check 'Deploy and smoke test remote demo' 240
+          node -e '
+            const value = process.env.REMOTE_DEMO_ORIGIN;
+            const url = new URL(value);
+            if (url.protocol !== "https:" || url.origin !== value) process.exit(1);
+          '
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error --max-time 30 \
+              --proto '=https' --output remote-health.json \
+              "$REMOTE_DEMO_ORIGIN/health/live" \
+              && jq --exit-status --arg revision "$BUILD_REVISION" \
+                '.status == "live" and .revision == $revision' \
+                remote-health.json >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              echo "The exact remote backend revision did not remain live" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Require HTTPS-only Pages before enabling the remote shell
+        env:
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
+        run: |
+          if [ -z "$REMOTE_DEMO_ORIGIN" ]; then
+            exit 0
+          fi
+          redirect_status="$(curl --silent --show-error --max-time 30 \
+            --proto '=http' --output /dev/null --dump-header redirect.headers \
+            --write-out '%{http_code}' http://www.idnteq.net/lit-shell/)"
+          redirect_location="$(awk '
+            BEGIN { IGNORECASE = 1 }
+            /^location:/ {
+              sub(/^[^:]*:[[:space:]]*/, "")
+              sub(/\r$/, "")
+              print
+            }
+          ' redirect.headers | tail -n 1)"
+          if { [ "$redirect_status" != 301 ] \
+            && [ "$redirect_status" != 308 ]; } \
+            || [ "$redirect_location" != https://www.idnteq.net/lit-shell/ ]; then
+            echo 'Pages is not permanently redirected to the expected HTTPS URL' >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error --max-time 30 \
+            --proto '=https' --output /dev/null \
+            https://www.idnteq.net/lit-shell/
+
       - name: Build and verify the static artifact
+        env:
+          LIT_SHELL_REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
         run: npm run pages:check
 
       - name: Configure GitHub Pages
@@ -92,17 +179,36 @@ jobs:
         env:
           BUILD_REVISION: ${{ github.sha }}
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+          REMOTE_DEMO_ORIGIN: ${{ vars.REMOTE_DEMO_ORIGIN }}
         run: |
           case "$PAGE_URL" in
             https://lsadehaan.github.io/lit-shell/|https://www.idnteq.net/lit-shell/) ;;
             http://www.idnteq.net/lit-shell/)
-              PAGE_URL="https://${PAGE_URL#http://}"
+              redirect_status="$(curl --silent --show-error --max-time 30 \
+                --proto '=http' --output /dev/null --dump-header redirect.headers \
+                --write-out '%{http_code}' "$PAGE_URL")"
+              redirect_location="$(awk '
+                BEGIN { IGNORECASE = 1 }
+                /^location:/ {
+                  sub(/^[^:]*:[[:space:]]*/, "")
+                  sub(/\r$/, "")
+                  print
+                }
+              ' redirect.headers | tail -n 1)"
+              if { [ "$redirect_status" != 301 ] \
+                && [ "$redirect_status" != 308 ]; } \
+                || [ "$redirect_location" != https://www.idnteq.net/lit-shell/ ]; then
+                echo "Pages HTTP URL does not permanently redirect to the expected HTTPS URL" >&2
+                exit 1
+              fi
+              PAGE_URL="$redirect_location"
               ;;
             *) echo "Unexpected Pages URL: $PAGE_URL" >&2; exit 1 ;;
           esac
           for attempt in $(seq 1 12); do
             if curl --fail --location --retry 3 --retry-all-errors \
-              --retry-delay 2 --silent --show-error \
+              --retry-delay 2 --silent --show-error --proto '=https' \
+              --proto-redir '=https' \
               --output page.html "$PAGE_URL" \
               && grep --quiet --fixed-strings 'Browser-only simulation' page.html \
               && grep --quiet --fixed-strings \
@@ -116,6 +222,27 @@ jobs:
             sleep 5
           done
           curl --fail --location --retry 10 --retry-all-errors \
-            --retry-delay 5 --silent --show-error \
+            --retry-delay 5 --silent --show-error --proto '=https' \
+            --proto-redir '=https' \
             --output demo.js "${PAGE_URL}assets/demo.js"
           test -s demo.js
+          curl --fail --location --retry 10 --retry-all-errors \
+            --retry-delay 5 --silent --show-error --proto '=https' \
+            --proto-redir '=https' \
+            --output remote.html "${PAGE_URL}remote/"
+          grep --quiet --fixed-strings 'discussions/34' remote.html
+          grep --quiet --fixed-strings \
+            "content=\"$BUILD_REVISION\"" remote.html
+          curl --fail --location --retry 10 --retry-all-errors \
+            --retry-delay 5 --silent --show-error --proto '=https' \
+            --proto-redir '=https' \
+            --output remote-demo.js "${PAGE_URL}assets/remote-demo.js"
+          test -s remote-demo.js
+          grep --quiet --fixed-strings \
+            "lit-shell-remote-build:$BUILD_REVISION" remote-demo.js
+          if [ -n "$REMOTE_DEMO_ORIGIN" ]; then
+            grep --quiet --fixed-strings \
+              "content=\"$REMOTE_DEMO_ORIGIN\"" remote.html
+          else
+            grep --quiet --fixed-strings "connect-src 'none'" remote.html
+          fi

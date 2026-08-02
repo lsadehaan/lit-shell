@@ -5,10 +5,18 @@
     "src/client/index.ts",
     "src/ui/index.ts",
     "demo/app.ts",
+    "demo/remote/app.ts",
+    "deploy/remote-shell/server.ts",
     "scripts/*.js",
     "tests/**/*.test.ts"
   ],
-  "project": ["demo/**/*.ts", "src/**/*.ts", "scripts/*.js", "tests/**/*.ts"],
+  "project": [
+    "demo/**/*.ts",
+    "deploy/remote-shell/**/*.ts",
+    "src/**/*.ts",
+    "scripts/*.js",
+    "tests/**/*.ts"
+  ],
   "ignoreExportsUsedInFile": {
     "interface": true,
     "type": true

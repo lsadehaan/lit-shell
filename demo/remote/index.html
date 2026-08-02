@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; base-uri 'none'; connect-src __LIT_SHELL_REMOTE_CONNECT_SRC__; font-src 'self'; form-action 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="An opt-in, short-lived, isolated remote PTY demonstration of lit-shell.js."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="lit-shell-build" content="__LIT_SHELL_BUILD__" />
+    <meta
+      name="lit-shell-remote-origin"
+      content="__LIT_SHELL_REMOTE_ORIGIN__"
+    />
+    <title>lit-shell.js — isolated remote shell demo</title>
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="lit-shell.js demo home">
+        <span aria-hidden="true">&gt;_</span>
+        <span>lit-shell.js</span>
+      </a>
+      <nav aria-label="Project links">
+        <a href="../">Safe simulator</a>
+        <a
+          href="https://github.com/lsadehaan/lit-shell"
+          rel="noopener noreferrer"
+          >Source on GitHub</a
+        >
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Real PTY · explicit opt-in</p>
+        <h1 id="page-title">Try a real, deliberately tiny shell.</h1>
+        <p class="lede">
+          This page connects the real lit-shell UI to one isolated, read-only
+          shell for at most 60 seconds. Starting it is anonymous and does not
+          require an account.
+        </p>
+      </section>
+
+      <section
+        class="safety-notice remote-boundary"
+        aria-labelledby="boundary-title"
+      >
+        <div class="safety-icon" aria-hidden="true">⌁</div>
+        <div>
+          <h2 id="boundary-title">
+            No writes, network, secrets, or persistence.
+          </h2>
+          <p>
+            A separate user, read-only chroot, syscall filter, and strict
+            process, CPU, input, output, idle, and wall-clock limits protect the
+            demo. Only one visitor is admitted at a time.
+          </p>
+        </div>
+      </section>
+
+      <section class="demo-section" aria-labelledby="remote-title">
+        <div class="section-heading remote-heading">
+          <div>
+            <p class="section-kicker">On-demand free service</p>
+            <h2 id="remote-title">Remote shell</h2>
+          </div>
+          <div class="remote-actions">
+            <button type="button" class="primary-action" data-remote-start>
+              Start real demo
+            </button>
+            <button
+              type="button"
+              class="secondary-action"
+              data-remote-end
+              hidden
+            >
+              End session
+            </button>
+          </div>
+        </div>
+
+        <div class="remote-state-row">
+          <p
+            class="demo-status"
+            data-remote-status
+            data-state="idle"
+            role="status"
+            aria-live="polite"
+          >
+            Nothing has connected. The free service may need about a minute to
+            wake.
+          </p>
+          <p class="remote-countdown" data-remote-countdown hidden></p>
+        </div>
+
+        <div
+          class="terminal-frame remote-terminal"
+          data-remote-mount
+          data-demo-state="idle"
+          aria-busy="false"
+        >
+          <div class="remote-placeholder">
+            <p>The shell starts only after you press the button.</p>
+            <p>
+              No analytics, login request, or background wake-up runs first.
+            </p>
+          </div>
+          <noscript
+            >JavaScript is required to start the remote terminal.</noscript
+          >
+        </div>
+
+        <p class="terminal-help">
+          Try <kbd>id</kbd>, <kbd>env</kbd>, <kbd>ls /</kbd>,
+          <kbd>cat /README.txt</kbd>, <kbd>uname -a</kbd>, or <kbd>date</kbd>.
+          Commands outside the fixed sandbox cannot be installed or reached.
+        </p>
+      </section>
+
+      <section class="details remote-interest" aria-labelledby="interest-title">
+        <div>
+          <p class="section-kicker">Optional interest list</p>
+          <h2 id="interest-title">Tell us you want more</h2>
+        </div>
+        <div>
+          <p>
+            Shell access stays anonymous. If you choose to register interest,
+            sign in to GitHub and add a 👍 or comment to the project discussion.
+            That GitHub action is optional and is not tied to your shell
+            session.
+          </p>
+          <p class="local-cta">
+            <a
+              href="https://github.com/lsadehaan/lit-shell/discussions/34"
+              rel="noopener noreferrer"
+              >Register interest or leave feedback</a
+            >
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>lit-shell.js is open source under the MIT License.</p>
+    </footer>
+
+    <script type="module" src="../assets/remote-demo.js"></script>
+  </body>
+</html>

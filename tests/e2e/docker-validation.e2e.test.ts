@@ -65,8 +65,15 @@ describe('TerminalServer Docker input validation (black-box)', () => {
     );
   });
 
-  it.each(['work', '../work', 'C:\\work', '--workdir', 'relative/path'])(
-    'rejects a non-absolute container working directory: %j',
+  it.each([
+    'work',
+    '../work',
+    'C:\\work',
+    '--workdir',
+    'relative/path',
+    '/safe\0escape',
+  ])(
+    'rejects an unsafe container working directory: %j',
     async (containerCwd) => {
       await expectInvalidSpawnOptions(
         { container: 'valid-container', containerCwd },

@@ -30,6 +30,12 @@ const NON_NEGATIVE_SERVER_LIMITS = [
   'historySize',
   'maxPreAuthMessages',
   'maxPreAuthBytes',
+  'maxConnectionMessages',
+  'maxConnectionBytes',
+  'maxSessionInputBytes',
+  'maxSessionOutputBytes',
+  'maxSessionLifetime',
+  'maxSessionsCreatedPerConnection',
 ] as const;
 
 function terminalOptions(
@@ -47,6 +53,12 @@ function sessionManagerConfig(
 }
 
 describe('TerminalServer resource-limit configuration', () => {
+  it('rejects a non-object constructor value at the runtime boundary', () => {
+    expect(
+      () => new TerminalServer(null as unknown as TerminalServerOptions),
+    ).toThrow(/options must be an object/);
+  });
+
   it.each(['server', 'port', 'misspelledLimit'])(
     'rejects unknown or removed constructor option %s',
     (name) => {
@@ -59,6 +71,7 @@ describe('TerminalServer resource-limit configuration', () => {
   it.each([
     'allowLocalExec',
     'allowDockerExec',
+    'allowSessionSharing',
     'historyEnabled',
     'verbose',
   ] as const)('rejects truthy string values for boolean option %s', (name) => {
@@ -105,6 +118,48 @@ describe('TerminalServer resource-limit configuration', () => {
     ).toThrow(/authorize must be a function/);
   });
 
+  it.each(['env', ['notARealOption'], ['shell', 7]])(
+    'rejects malformed allowedClientOptions value %j',
+    (value) => {
+      expect(
+        () =>
+          new TerminalServer({
+            allowedClientOptions: value,
+          } as unknown as TerminalServerOptions),
+      ).toThrow(/allowedClientOptions/);
+    },
+  );
+
+  it.each([
+    null,
+    [],
+    { 'NOT-PORTABLE': 'value' },
+    { VALID: 7 },
+    { VALID: undefined },
+    { VALID: 'contains\0nul' },
+  ])('rejects malformed localEnvironment value %j', (value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localEnvironment: value,
+        } as unknown as TerminalServerOptions),
+    ).toThrow(/localEnvironment/);
+  });
+
+  it('accepts an empty client-option allowlist and a sanitized environment', () => {
+    const server = new TerminalServer({
+      allowedClientOptions: [],
+      localEnvironment: { PATH: '/usr/bin:/bin' },
+    });
+
+    expect(server.getStats()).toEqual({
+      clientCount: 0,
+      orphanedCount: 0,
+      sessionCount: 0,
+    });
+    server.close();
+  });
+
   it.each(
     POSITIVE_SERVER_LIMITS.flatMap((name) =>
       [0, ...INVALID_INTEGER_VALUES].map((value) => [name, value] as const),
@@ -125,7 +180,7 @@ describe('TerminalServer resource-limit configuration', () => {
     );
   });
 
-  it.each(['cleanupInterval', 'orphanTimeout'] as const)(
+  it.each(['cleanupInterval', 'orphanTimeout', 'maxSessionLifetime'] as const)(
     'rejects timer overflow for %s',
     (name) => {
       expect(
@@ -141,6 +196,12 @@ describe('TerminalServer resource-limit configuration', () => {
       historySize: 0,
       maxPreAuthMessages: 0,
       maxPreAuthBytes: 0,
+      maxConnectionMessages: 0,
+      maxConnectionBytes: 0,
+      maxSessionInputBytes: 0,
+      maxSessionOutputBytes: 0,
+      maxSessionLifetime: 0,
+      maxSessionsCreatedPerConnection: 0,
     });
 
     expect(server.getStats()).toEqual({

@@ -11,6 +11,7 @@ export default tseslint.config(
       'coverage/**',
       'dist/**',
       '_site/**',
+      '_site-*/**',
       'node_modules/**',
       'playwright-report/**',
       'reports/**',
@@ -21,7 +22,7 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
-    files: ['src/**/*.ts', 'demo/**/*.ts'],
+    files: ['src/**/*.ts', 'demo/**/*.ts', 'deploy/remote-shell/**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -45,7 +46,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['src/server/**/*.ts'],
+    files: ['src/server/**/*.ts', 'deploy/remote-shell/**/*.ts'],
     plugins: { security },
     rules: security.configs.recommended.rules,
   },
@@ -53,6 +54,12 @@ export default tseslint.config(
     files: ['demo/**/*.ts'],
     languageOptions: {
       globals: { ...globals.browser },
+    },
+  },
+  {
+    files: ['deploy/remote-shell/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.node },
     },
   },
   {

@@ -51,6 +51,12 @@ function normalizeSharedSession(
   return { ...session, createdAt };
 }
 
+function copyProtocols(
+  protocols: ClientConfig['protocols'],
+): Required<ClientConfig>['protocols'] {
+  return Array.isArray(protocols) ? [...protocols] : (protocols ?? []);
+}
+
 /**
  * A stateful client that owns at most one active terminal session.
  *
@@ -95,6 +101,7 @@ export class TerminalClient {
   constructor(config: ClientConfig) {
     this.config = {
       url: config.url,
+      protocols: copyProtocols(config.protocols),
       reconnect: config.reconnect ?? true,
       maxReconnectAttempts: config.maxReconnectAttempts ?? 10,
       reconnectDelay: config.reconnectDelay ?? 1_000,
@@ -119,7 +126,7 @@ export class TerminalClient {
 
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.config.url);
+      socket = new WebSocket(this.config.url, this.config.protocols);
       this.ws = socket;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -211,6 +218,11 @@ export class TerminalClient {
       this.rejectPendingRequests(new Error('Client disconnected'));
       this.emit(this.disconnectHandlers);
     }
+  }
+
+  /** Forget configured subprotocols after a one-use capability is consumed. */
+  clearProtocols(): void {
+    this.config.protocols = [];
   }
 
   private scheduleReconnect(): void {

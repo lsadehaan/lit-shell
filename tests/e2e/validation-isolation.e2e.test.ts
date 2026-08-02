@@ -56,6 +56,11 @@ describe('TerminalServer protocol validation (black-box)', () => {
     ['array spawn options', () => ({ type: 'spawn', options: [] })],
     ['a non-string shell', () => ({ type: 'spawn', options: { shell: 7 } })],
     ['a non-string cwd', () => ({ type: 'spawn', options: { cwd: false } })],
+    ['an array environment', () => ({ type: 'spawn', options: { env: [] } })],
+    [
+      'a non-string environment value',
+      () => ({ type: 'spawn', options: { env: { VALID: 7 } } }),
+    ],
     ['zero columns', () => ({ type: 'spawn', options: { cols: 0 } })],
     ['negative rows', () => ({ type: 'spawn', options: { rows: -1 } })],
     ['oversized columns', () => ({ type: 'spawn', options: { cols: 1_001 } })],

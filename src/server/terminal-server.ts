@@ -52,6 +52,7 @@ const DOCKER_LIST_TIMEOUT_MS = 5_000;
 const DOCKER_LIST_MAX_BUFFER_BYTES = 1024 * 1024;
 const DOCKER_LIST_CACHE_TTL_MS = 1_000;
 const PRE_AUTH_LIMIT_ERROR = 'Pre-authorization request limit exceeded';
+const CONNECTION_LIMIT_ERROR = 'Connection request limit exceeded';
 
 const DOCKER_CONTAINER_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const DOCKER_CONTAINER_USER_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
@@ -89,9 +90,11 @@ const TERMINAL_SERVER_OPTION_KEYS = new Set([
   'defaultShell',
   'defaultCwd',
   'maxSessionsPerClient',
+  'maxSessionsCreatedPerConnection',
   'idleTimeout',
   'allowLocalExec',
   'allowDockerExec',
+  'allowSessionSharing',
   'allowedContainerPatterns',
   'defaultContainerShell',
   'path',
@@ -99,10 +102,17 @@ const TERMINAL_SERVER_OPTION_KEYS = new Set([
   'dockerPath',
   'allowedOrigins',
   'authorize',
+  'allowedClientOptions',
+  'localEnvironment',
   'maxPreAuthMessages',
   'maxPreAuthBytes',
   'maxMessageBytes',
+  'maxConnectionMessages',
+  'maxConnectionBytes',
   'maxBufferedOutputBytes',
+  'maxSessionInputBytes',
+  'maxSessionOutputBytes',
+  'maxSessionLifetime',
   'cleanupInterval',
   'maxClientsPerSession',
   'orphanTimeout',
@@ -214,6 +224,51 @@ function assertOptionalStringArray(value: unknown, name: string): void {
   }
 }
 
+function assertOptionalClientOptionArray(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    throw new TypeError('allowedClientOptions must be an array');
+  }
+  const invalidIndex = value.findIndex(
+    (entry) => typeof entry !== 'string' || !TERMINAL_OPTION_KEYS.has(entry),
+  );
+  if (invalidIndex !== -1) {
+    throw new TypeError(
+      `allowedClientOptions[${invalidIndex}] must name a supported terminal option`,
+    );
+  }
+}
+
+function assertOptionalEnvironment(value: unknown): void {
+  if (value === undefined) return;
+  if (!isJsonObject(value)) {
+    throw new TypeError('localEnvironment must be an object');
+  }
+  for (const [key, environmentValue] of Object.entries(value)) {
+    if (!PORTABLE_ENVIRONMENT_KEY_PATTERN.test(key)) {
+      throw new TypeError('localEnvironment keys must use portable syntax');
+    }
+    if (
+      typeof environmentValue !== 'string' ||
+      environmentValue.includes('\0')
+    ) {
+      throw new TypeError(
+        'localEnvironment values must be strings without NUL bytes',
+      );
+    }
+  }
+}
+
+function assertAllowedClientOptions(
+  value: JsonObject,
+  allowedOptions: ReadonlySet<string>,
+): void {
+  const disallowed = Object.keys(value).find((key) => !allowedOptions.has(key));
+  if (disallowed !== undefined) {
+    throw new Error(`spawn option is disabled by server policy: ${disallowed}`);
+  }
+}
+
 function assertOptionalAuthorize(value: unknown): void {
   if (value !== undefined && typeof value !== 'function') {
     throw new TypeError('authorize must be a function');
@@ -230,6 +285,8 @@ function validateTerminalServerOptionTypes(
     'allowedContainerPatterns',
   );
   assertOptionalStringArray(options.allowedOrigins, 'allowedOrigins');
+  assertOptionalClientOptionArray(options.allowedClientOptions);
+  assertOptionalEnvironment(options.localEnvironment);
   assertOptionalNonEmptyString(options.defaultShell, 'defaultShell');
   assertOptionalNonEmptyString(options.defaultCwd, 'defaultCwd');
   assertOptionalNonEmptyString(
@@ -240,6 +297,7 @@ function validateTerminalServerOptionTypes(
   assertOptionalNonEmptyString(options.dockerPath, 'dockerPath');
   assertOptionalBoolean(options.allowLocalExec, 'allowLocalExec');
   assertOptionalBoolean(options.allowDockerExec, 'allowDockerExec');
+  assertOptionalBoolean(options.allowSessionSharing, 'allowSessionSharing');
   assertOptionalBoolean(options.historyEnabled, 'historyEnabled');
   assertOptionalBoolean(options.verbose, 'verbose');
   assertOptionalAuthorize(options.authorize);
@@ -334,6 +392,40 @@ function isValidContainerUser(value: string): boolean {
   );
 }
 
+function assertContainerIdentityOptions(value: JsonObject): void {
+  if (
+    typeof value.container === 'string' &&
+    !DOCKER_CONTAINER_IDENTIFIER_PATTERN.test(value.container)
+  ) {
+    throw new Error('container must be a valid Docker container name or ID');
+  }
+  if (
+    typeof value.containerUser === 'string' &&
+    !isValidContainerUser(value.containerUser)
+  ) {
+    throw new Error('containerUser must be a valid user or user:group');
+  }
+}
+
+function assertContainerCwd(value: JsonObject): void {
+  if (
+    typeof value.containerCwd === 'string' &&
+    (!path.posix.isAbsolute(value.containerCwd) ||
+      value.containerCwd.includes('\0'))
+  ) {
+    throw new Error('containerCwd must be an absolute POSIX path');
+  }
+}
+
+function assertSessionSharingAllowed(
+  value: JsonObject,
+  sharingAllowed: boolean,
+): void {
+  if (value.allowJoin === true && !sharingAllowed) {
+    throw new Error('Session sharing is disabled by server policy');
+  }
+}
+
 function compileContainerMatcher(pattern: string, index: number): RegExp {
   if (typeof pattern !== 'string') {
     throw new TypeError(
@@ -380,6 +472,33 @@ function getDefaultShell(): string {
   return process.env.SHELL || '/bin/bash';
 }
 
+function definedProcessEnvironment(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string',
+    ),
+  );
+}
+
+function resolveSpawnPolicy(options: TerminalServerOptions): {
+  allowedClientOptions: Array<keyof TerminalOptions>;
+  allowSessionSharing: boolean;
+  localEnvironment: Record<string, string>;
+} {
+  const {
+    allowedClientOptions = Array.from(TERMINAL_OPTION_KEYS) as Array<
+      keyof TerminalOptions
+    >,
+    allowSessionSharing = true,
+    localEnvironment = definedProcessEnvironment(),
+  } = options;
+  return {
+    allowedClientOptions: [...allowedClientOptions],
+    allowSessionSharing,
+    localEnvironment: { ...localEnvironment },
+  };
+}
+
 /**
  * Terminal server options
  */
@@ -401,14 +520,28 @@ export interface TerminalServerOptions extends ServerConfig {
    * loaded or server metadata is sent. Throwing safely denies the connection.
    */
   authorize?: (request: IncomingMessage) => boolean | Promise<boolean>;
+  /** Client-controlled spawn fields accepted by this server (default: all supported fields) */
+  allowedClientOptions?: Array<keyof TerminalOptions>;
+  /** Exact environment inherited by local PTYs (default: a snapshot of process.env) */
+  localEnvironment?: Record<string, string>;
   /** Maximum frames buffered while `authorize` is pending (default: 32, minimum: 0) */
   maxPreAuthMessages?: number;
   /** Maximum frame bytes buffered while `authorize` is pending (default: 65536, minimum: 0) */
   maxPreAuthBytes?: number;
   /** Maximum bytes accepted in one WebSocket request (default: 1048576, minimum: 1) */
   maxMessageBytes?: number;
+  /** Maximum requests accepted over one connection (default: 0, unlimited) */
+  maxConnectionMessages?: number;
+  /** Maximum wire bytes accepted over one connection (default: 0, unlimited) */
+  maxConnectionBytes?: number;
   /** Maximum queued output per WebSocket client (default: 1048576 bytes) */
   maxBufferedOutputBytes?: number;
+  /** Maximum cumulative input per session in bytes (default: 0, disabled) */
+  maxSessionInputBytes?: number;
+  /** Maximum cumulative output per session in bytes (default: 0, disabled) */
+  maxSessionOutputBytes?: number;
+  /** Absolute session lifetime in ms (default: 0, disabled; max: 2147483647) */
+  maxSessionLifetime?: number;
   /** Interval for enforcing idle timeouts (default: 60000 ms, max: 2147483647) */
   cleanupInterval?: number;
 
@@ -426,6 +559,10 @@ export interface TerminalServerOptions extends ServerConfig {
   historyEnabled?: boolean;
   /** Maximum total sessions (default: 100, minimum: 1) */
   maxSessionsTotal?: number;
+  /** Permit clients to create joinable sessions (default: true) */
+  allowSessionSharing?: boolean;
+  /** Maximum sessions created over one connection (default: 0, unlimited) */
+  maxSessionsCreatedPerConnection?: number;
 }
 
 /**
@@ -444,6 +581,7 @@ export class TerminalServer {
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private clientIds = new WeakMap<WebSocket, string>();
   private connections = new Set<WebSocket>();
+  private sessionCreationsByClient = new Map<string, number>();
   private containerListInFlight: Promise<ContainerInfo[]> | null = null;
   private containerListCache: {
     containers: ContainerInfo[];
@@ -451,6 +589,15 @@ export class TerminalServer {
   } | null = null;
   private closed = false;
   private readonly containerMatchers: RegExp[];
+  private readonly clientOptionKeys: ReadonlySet<string>;
+  private readonly sessionUsage = new Map<
+    string,
+    {
+      inputBytes: number;
+      outputBytes: number;
+      lifetimeTimer: ReturnType<typeof setTimeout> | null;
+    }
+  >();
 
   constructor(options: TerminalServerOptions = {}) {
     const runtimeOptions: unknown = options;
@@ -489,12 +636,44 @@ export class TerminalServer {
       'maxMessageBytes',
       1,
     );
+    const maxConnectionMessages = resolveSafeIntegerOption(
+      options.maxConnectionMessages,
+      0,
+      'maxConnectionMessages',
+      0,
+    );
+    const maxConnectionBytes = resolveSafeIntegerOption(
+      options.maxConnectionBytes,
+      0,
+      'maxConnectionBytes',
+      0,
+    );
     const maxBufferedOutputBytes = resolveSafeIntegerOption(
       options.maxBufferedOutputBytes,
       DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
       'maxBufferedOutputBytes',
       1,
     );
+    const maxSessionInputBytes = resolveSafeIntegerOption(
+      options.maxSessionInputBytes,
+      0,
+      'maxSessionInputBytes',
+      0,
+    );
+    const maxSessionOutputBytes = resolveSafeIntegerOption(
+      options.maxSessionOutputBytes,
+      0,
+      'maxSessionOutputBytes',
+      0,
+    );
+    const maxSessionLifetime = resolveSafeIntegerOption(
+      options.maxSessionLifetime,
+      0,
+      'maxSessionLifetime',
+      0,
+      MAX_TIMER_DELAY_MS,
+    );
+    const spawnPolicy = resolveSpawnPolicy(options);
 
     this.config = {
       allowedShells: [...(options.allowedShells ?? [getDefaultShell()])],
@@ -507,6 +686,12 @@ export class TerminalServer {
         'maxSessionsPerClient',
         1,
       ),
+      maxSessionsCreatedPerConnection: resolveSafeIntegerOption(
+        options.maxSessionsCreatedPerConnection,
+        0,
+        'maxSessionsCreatedPerConnection',
+        0,
+      ),
       idleTimeout: resolveSafeIntegerOption(
         options.idleTimeout,
         30 * 60 * 1000,
@@ -514,6 +699,7 @@ export class TerminalServer {
         0,
       ), // 30 minutes; 0 disables idle cleanup
       allowLocalExec: options.allowLocalExec ?? true,
+      ...spawnPolicy,
       path: options.path ?? '/terminal',
       verbose: options.verbose ?? false,
       // Docker options
@@ -526,7 +712,12 @@ export class TerminalServer {
       maxPreAuthMessages,
       maxPreAuthBytes,
       maxMessageBytes,
+      maxConnectionMessages,
+      maxConnectionBytes,
       maxBufferedOutputBytes,
+      maxSessionInputBytes,
+      maxSessionOutputBytes,
+      maxSessionLifetime,
       cleanupInterval,
       // Multiplexing options
       maxClientsPerSession: resolveSafeIntegerOption(
@@ -559,6 +750,7 @@ export class TerminalServer {
     this.containerMatchers = this.config.allowedContainerPatterns.map(
       compileContainerMatcher,
     );
+    this.clientOptionKeys = new Set(this.config.allowedClientOptions);
 
     // Initialize session manager
     this.sessionManager = new SessionManager({
@@ -575,6 +767,7 @@ export class TerminalServer {
     this.sessionManager.on(
       'sessionClosed',
       (sessionId: string, reason: string) => {
+        this.clearSessionUsage(sessionId);
         this.log(`Session ${sessionId} closed: ${reason}`);
       },
     );
@@ -686,6 +879,8 @@ export class TerminalServer {
     let preAuthRejected = false;
     let preAuthMessages = 0;
     let preAuthBytes = 0;
+    let connectionMessages = 0;
+    let connectionBytes = 0;
     let rejectPreAuthLimit!: (error: ConnectionPolicyError) => void;
     const preAuthLimit = new Promise<never>((_resolve, reject) => {
       rejectPreAuthLimit = reject;
@@ -713,6 +908,21 @@ export class TerminalServer {
       );
       if (messageBytes === undefined) {
         preAuthRejected = true;
+        return;
+      }
+      connectionMessages += 1;
+      connectionBytes += messageBytes;
+      if (
+        (this.config.maxConnectionMessages > 0 &&
+          connectionMessages > this.config.maxConnectionMessages) ||
+        (this.config.maxConnectionBytes > 0 &&
+          connectionBytes > this.config.maxConnectionBytes)
+      ) {
+        preAuthRejected = true;
+        if (!connectionReadyComplete) {
+          rejectPreAuthLimit(new ConnectionPolicyError(CONNECTION_LIMIT_ERROR));
+        }
+        closeOpenWebSocket(ws, 1008, CONNECTION_LIMIT_ERROR);
         return;
       }
 
@@ -772,6 +982,7 @@ export class TerminalServer {
 
   private handleClientDisconnect(ws: WebSocket, clientId: string): void {
     this.connections.delete(ws);
+    this.sessionCreationsByClient.delete(clientId);
     this.log(`Client ${clientId} disconnected`);
     const affectedSessions =
       this.sessionManager.removeClientFromAllSessions(clientId);
@@ -934,6 +1145,7 @@ export class TerminalServer {
       throw new Error('spawn options must be an object');
     }
     assertKnownKeys(value, TERMINAL_OPTION_KEYS, 'spawn options');
+    assertAllowedClientOptions(value, this.clientOptionKeys);
 
     this.validateOptionalString(value.shell, 'shell');
     this.validateOptionalString(value.cwd, 'cwd');
@@ -957,28 +1169,11 @@ export class TerminalServer {
     this.validateOptionalBoolean(value.allowJoin, 'allowJoin');
     this.validateOptionalBoolean(value.enableHistory, 'enableHistory');
     this.validateOptionalBoolean(value.useTmux, 'useTmux');
+    assertSessionSharingAllowed(value, this.config.allowSessionSharing);
 
     assertTerminalOptionCompatibility(value);
-
-    if (
-      typeof value.container === 'string' &&
-      !DOCKER_CONTAINER_IDENTIFIER_PATTERN.test(value.container)
-    ) {
-      throw new Error('container must be a valid Docker container name or ID');
-    }
-    if (
-      typeof value.containerUser === 'string' &&
-      !isValidContainerUser(value.containerUser)
-    ) {
-      throw new Error('containerUser must be a valid user or user:group');
-    }
-    if (
-      typeof value.containerCwd === 'string' &&
-      (!path.posix.isAbsolute(value.containerCwd) ||
-        value.containerCwd.includes('\0'))
-    ) {
-      throw new Error('containerCwd must be an absolute POSIX path');
-    }
+    assertContainerIdentityOptions(value);
+    assertContainerCwd(value);
 
     if (
       value.orphanTimeout !== undefined &&
@@ -1520,6 +1715,15 @@ export class TerminalServer {
   ): void {
     this.assertExecutionModeAllowed(options);
 
+    if (this.clientCreationLimitReached(clientId)) {
+      this.sendError(
+        ws,
+        `Connection session creation limit (${this.config.maxSessionsCreatedPerConnection}) reached`,
+        { requestId },
+      );
+      return;
+    }
+
     // Check client session limit
     if (this.clientSessionLimitReached(clientId)) {
       this.sendError(
@@ -1573,6 +1777,7 @@ export class TerminalServer {
 
       if (!session) return;
 
+      this.recordSessionCreation(clientId);
       this.setupSessionHandlers(session);
 
       // Notify client
@@ -1631,7 +1836,7 @@ export class TerminalServer {
         cols,
         rows,
         cwd,
-        env: { ...process.env, ...env },
+        env: { ...this.config.localEnvironment, ...env },
       });
 
       // Create session via SessionManager
@@ -1652,6 +1857,7 @@ export class TerminalServer {
           options.orphanTimeout === 0 ? undefined : options.orphanTimeout,
       });
 
+      this.recordSessionCreation(clientId);
       this.setupSessionHandlers(session);
 
       // Notify client
@@ -1690,6 +1896,21 @@ export class TerminalServer {
     );
   }
 
+  private clientCreationLimitReached(clientId: string): boolean {
+    return (
+      this.config.maxSessionsCreatedPerConnection > 0 &&
+      (this.sessionCreationsByClient.get(clientId) ?? 0) >=
+        this.config.maxSessionsCreatedPerConnection
+    );
+  }
+
+  private recordSessionCreation(clientId: string): void {
+    this.sessionCreationsByClient.set(
+      clientId,
+      (this.sessionCreationsByClient.get(clientId) ?? 0) + 1,
+    );
+  }
+
   private assertClientSessionCapacity(
     session: SharedSession,
     clientId: string,
@@ -1724,26 +1945,56 @@ export class TerminalServer {
     this.killPtySafely(ptyProcess);
   }
 
+  private createSessionLifetimeTimer(
+    sessionId: string,
+  ): ReturnType<typeof setTimeout> | null {
+    if (this.config.maxSessionLifetime === 0) return null;
+    const timer = setTimeout(() => {
+      this.closeSessionForLimit(sessionId, 'lifetime_timeout');
+    }, this.config.maxSessionLifetime);
+    timer.unref();
+    return timer;
+  }
+
+  private initializeSessionUsage(sessionId: string): void {
+    this.sessionUsage.set(sessionId, {
+      inputBytes: 0,
+      outputBytes: 0,
+      lifetimeTimer: this.createSessionLifetimeTimer(sessionId),
+    });
+  }
+
+  private handleSessionOutput(sessionId: string, data: string): void {
+    const usage = this.sessionUsage.get(sessionId);
+    if (!usage) return;
+    usage.outputBytes += Buffer.byteLength(data);
+    if (
+      this.config.maxSessionOutputBytes > 0 &&
+      usage.outputBytes > this.config.maxSessionOutputBytes
+    ) {
+      this.closeSessionForLimit(sessionId, 'output_limit');
+      return;
+    }
+
+    this.sessionManager.updateSessionActivity(sessionId);
+    this.sessionManager.appendHistory(sessionId, data);
+    this.sessionManager.broadcastToSession(sessionId, {
+      type: 'data',
+      sessionId,
+      data,
+    });
+  }
+
   /**
    * Setup PTY event handlers for a session
    */
   private setupSessionHandlers(session: SharedSession): void {
     const sessionId = session.id;
+    this.initializeSessionUsage(sessionId);
 
     // Handle PTY output
     session.pty.onData((data: string) => {
-      // Update activity
-      this.sessionManager.updateSessionActivity(sessionId);
-
-      // Store in history buffer
-      this.sessionManager.appendHistory(sessionId, data);
-
-      // Broadcast to all connected clients
-      this.sessionManager.broadcastToSession(sessionId, {
-        type: 'data',
-        sessionId,
-        data,
-      });
+      this.handleSessionOutput(sessionId, data);
     });
 
     // Handle PTY exit
@@ -1766,6 +2017,39 @@ export class TerminalServer {
       this.sessionManager.closeSession(sessionId, 'process_exit');
       this.log(`Session exited: ${sessionId} (code: ${exitCode})`);
     });
+  }
+
+  private writeAcceptedSessionInput(
+    ws: WebSocket,
+    sessionId: string,
+    clientId: string,
+    data: string,
+    requestId: RequestId | undefined,
+    session: SharedSession,
+  ): void {
+    const usage = this.sessionUsage.get(sessionId);
+    if (!usage) {
+      this.sendError(ws, `Session is closing: ${sessionId}`, {
+        requestId,
+        sessionId,
+      });
+      return;
+    }
+    usage.inputBytes += Buffer.byteLength(data);
+    if (
+      this.config.maxSessionInputBytes > 0 &&
+      usage.inputBytes > this.config.maxSessionInputBytes
+    ) {
+      this.sendError(ws, 'Session input limit exceeded', {
+        requestId,
+        sessionId,
+      });
+      this.closeSessionForLimit(sessionId, 'input_limit');
+      return;
+    }
+
+    this.sessionManager.updateClientActivity(sessionId, clientId);
+    session.pty.write(data);
   }
 
   /**
@@ -1798,8 +2082,38 @@ export class TerminalServer {
       return;
     }
 
-    this.sessionManager.updateClientActivity(sessionId, clientId);
-    session.pty.write(data);
+    this.writeAcceptedSessionInput(
+      ws,
+      sessionId,
+      clientId,
+      data,
+      requestId,
+      session,
+    );
+  }
+
+  private clearSessionUsage(sessionId: string): void {
+    const usage = this.sessionUsage.get(sessionId);
+    if (usage?.lifetimeTimer) clearTimeout(usage.lifetimeTimer);
+    this.sessionUsage.delete(sessionId);
+  }
+
+  private closeSessionForLimit(
+    sessionId: string,
+    reason: 'input_limit' | 'output_limit' | 'lifetime_timeout',
+  ): void {
+    if (!this.sessionManager.hasSession(sessionId)) return;
+    this.sessionManager.broadcastToSession(sessionId, {
+      type: 'exit',
+      sessionId,
+      exitCode: -1,
+    });
+    this.sessionManager.broadcastToSession(sessionId, {
+      type: 'sessionClosed',
+      sessionId,
+      reason,
+    });
+    this.sessionManager.closeSession(sessionId, reason);
   }
 
   /**

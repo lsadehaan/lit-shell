@@ -6,7 +6,12 @@ import { extname, resolve, sep } from 'node:path';
 export interface PagesDemoFixture {
   readonly origin: string;
   readonly pageUrl: string;
+  readonly remotePageUrl: string;
   close(): Promise<void>;
+}
+
+interface PagesDemoFixtureOptions {
+  readonly siteDirectory?: string;
 }
 
 const projectPrefix = '/lit-shell/';
@@ -17,10 +22,14 @@ const contentTypes: Readonly<Record<string, string>> = Object.freeze({
   '.svg': 'image/svg+xml',
 });
 
-export async function startPagesDemoFixture(): Promise<PagesDemoFixture> {
+export async function startPagesDemoFixture(
+  options: PagesDemoFixtureOptions = {},
+): Promise<PagesDemoFixture> {
   let siteRoot: string;
   try {
-    siteRoot = await realpath(resolve(process.cwd(), '_site'));
+    siteRoot = await realpath(
+      resolve(process.cwd(), options.siteDirectory ?? '_site'),
+    );
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
       throw new Error(
@@ -51,6 +60,7 @@ export async function startPagesDemoFixture(): Promise<PagesDemoFixture> {
         response.writeHead(400).end('Bad request\n');
         return;
       }
+      if (relativePath.endsWith('/')) relativePath += 'index.html';
       if (
         relativePath.includes('\0') ||
         relativePath.includes('\\') ||
@@ -125,6 +135,7 @@ export async function startPagesDemoFixture(): Promise<PagesDemoFixture> {
   return {
     origin,
     pageUrl: `${origin}${projectPrefix}`,
+    remotePageUrl: `${origin}${projectPrefix}remote/`,
     async close() {
       await closeServer(server);
     },

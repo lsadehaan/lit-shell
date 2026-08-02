@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: lit-shell-remote-demo
+    runtime: docker
+    repo: https://github.com/lsadehaan/lit-shell
+    branch: master
+    plan: free
+    region: frankfurt
+    dockerContext: .
+    dockerfilePath: ./deploy/remote-shell/Dockerfile
+    healthCheckPath: /health/ready
+    numInstances: 1
+    autoDeployTrigger: off
+    previews:
+      generation: off
+    envVars:
+      - key: LIT_SHELL_ALLOWED_ORIGIN
+        value: https://www.idnteq.net
+      - key: LIT_SHELL_HOST_CANARY
+        value: gateway-environment-must-not-cross

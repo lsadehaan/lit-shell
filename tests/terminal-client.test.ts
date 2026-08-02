@@ -11,6 +11,7 @@ class TestWebSocket {
   static instances: TestWebSocket[] = [];
 
   readonly url: string;
+  readonly protocols: string | string[] | undefined;
   readyState = TestWebSocket.CONNECTING;
   sent: Record<string, unknown>[] = [];
   onopen: Listener = null;
@@ -18,8 +19,9 @@ class TestWebSocket {
   onerror: Listener = null;
   onmessage: Listener = null;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = protocols;
     TestWebSocket.instances.push(this);
   }
 
@@ -129,6 +131,68 @@ describe('TerminalClient public contract', () => {
     await expect(Promise.all([first, second])).resolves.toEqual([
       undefined,
       undefined,
+    ]);
+  });
+
+  it('uses configured WebSocket subprotocols without placing them in the URL', async () => {
+    const protocols = ['lit-shell.v1', 'lit-shell.admission.secret-capability'];
+    const client = new TerminalClient({
+      url: 'wss://terminal.test/terminal',
+      protocols,
+      reconnect: false,
+    });
+
+    const connecting = client.connect();
+    const socket = latestSocket();
+    expect(socket.url).toBe('wss://terminal.test/terminal');
+    expect(socket.protocols).toEqual(protocols);
+    expect(socket.url).not.toContain('secret-capability');
+    socket.open();
+    await connecting;
+  });
+
+  it('supports one scalar WebSocket subprotocol', async () => {
+    const { socket } = await connectedClient({
+      url: 'wss://terminal.test/terminal',
+      protocols: 'lit-shell.v1',
+      reconnect: false,
+    });
+
+    expect(socket.protocols).toBe('lit-shell.v1');
+  });
+
+  it('reconnects by default when the transport closes', async () => {
+    vi.useFakeTimers();
+    const { client, socket } = await connectedClient({
+      url: 'ws://terminal.test',
+    });
+
+    socket.finishClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(TestWebSocket.instances).toHaveLength(2);
+    latestSocket().open();
+    await Promise.resolve();
+    client.disconnect();
+  });
+
+  it('can forget a consumed one-use WebSocket capability', async () => {
+    const protocols = ['lit-shell.v1', 'lit-shell.admission.secret-capability'];
+    const { client, socket } = await connectedClient({
+      url: 'wss://terminal.test/terminal',
+      protocols,
+      reconnect: false,
+    });
+
+    client.clearProtocols();
+    socket.finishClose();
+    const reconnecting = client.connect();
+    const replacement = latestSocket();
+    expect(replacement.protocols).toEqual([]);
+    replacement.open();
+    await reconnecting;
+    expect(protocols).toEqual([
+      'lit-shell.v1',
+      'lit-shell.admission.secret-capability',
     ]);
   });
 

@@ -18,6 +18,12 @@ runs entirely in your browser. It never opens a WebSocket and cannot execute
 operating-system commands. A real terminal still requires the secured
 Node/WebSocket server described below.
 
+The separate [opt-in remote demo](https://www.idnteq.net/lit-shell/remote/)
+provides a real, anonymous PTY for at most 60 seconds when its independently
+tested sandbox backend is available. It starts no network request until the
+visitor presses the button and remains disabled if the exact reviewed backend
+revision is not configured.
+
 > [!CAUTION]
 > A terminal endpoint is remote code execution by design. lit-shell does not
 > replace application authentication, authorization, TLS, origin validation,
@@ -382,7 +388,11 @@ client.leave(sessionId); // Leave without killing
 client.onClientJoined((sessionId, count) => console.log(`${count} clients`));
 client.onClientLeft((sessionId, count) => console.log(`${count} clients`));
 client.onSessionClosed((sessionId, reason) => console.log(reason));
-// reason also includes 'idle_timeout', 'cleanup', and 'error'
+// reason also includes idle/input/output/lifetime limits, cleanup, and error
+
+// One-use authorization subprotocols can be removed from client memory after
+// the WebSocket has opened.
+client.clearProtocols();
 
 // Reconnection with session recovery
 client.onReconnectWithSession((sessionId) => {
@@ -432,12 +442,20 @@ client.onReconnectWithSession((sessionId) => {
 | `rows`                  | number                            | `24`                   | Initial rows                                        |
 | `auto-connect`          | boolean                           | `false`                | Connect on mount                                    |
 | `auto-spawn`            | boolean                           | `false`                | Spawn on connect                                    |
+| `no-reconnect`          | boolean                           | `false`                | Disable automatic transport reconnection            |
 | `allow-join`            | boolean                           | `false`                | Make spawned sessions discoverable and joinable     |
 | `no-header`             | boolean                           | `false`                | Hide header bar                                     |
 | `show-connection-panel` | boolean                           | `false`                | Show connection panel with container/shell selector |
 | `show-settings`         | boolean                           | `false`                | Show settings dropdown (theme, font size)           |
 | `show-status-bar`       | boolean                           | `false`                | Show status bar with connection info and errors     |
 | `show-tabs`             | boolean                           | `false`                | Enable tabbed terminal interface                    |
+| `screen-reader-mode`    | boolean                           | `false`                | Enable xterm.js screen-reader output                |
+
+Capability-bearing WebSocket subprotocols are deliberately programmatic-only
+so they cannot be reflected into HTML. Set `terminal.protocols` before
+connecting, set `terminal.reconnect = false` (or use `no-reconnect` in markup)
+for a one-use admission, and call `terminal.clearProtocols()` once the socket
+has opened.
 
 **Methods:**
 
@@ -446,6 +464,7 @@ const terminal = document.querySelector('lit-shell-terminal');
 
 await terminal.connect(); // Connect to server
 terminal.disconnect(); // Disconnect
+terminal.clearProtocols(); // Forget consumed one-use WebSocket subprotocols
 await terminal.spawn(); // Spawn session
 terminal.kill(); // Kill session
 terminal.clear(); // Clear display
@@ -470,6 +489,9 @@ terminal.addEventListener('connect', () => {});
 terminal.addEventListener('disconnect', () => {});
 terminal.addEventListener('spawned', (e) => console.log(e.detail.session));
 terminal.addEventListener('exit', (e) => console.log(e.detail.exitCode));
+terminal.addEventListener('session-closed', (e) =>
+  console.log(e.detail.reason),
+);
 terminal.addEventListener('error', (e) => console.log(e.detail.error));
 terminal.addEventListener('theme-change', (e) => console.log(e.detail.theme));
 ```
@@ -772,12 +794,16 @@ see the [examples](./examples) directory:
 ### Running Locally (Development)
 
 Development requires Node.js 22.13+ on the Node.js 22 line, or Node.js 24+;
-Node.js 24 is the repository default. Use the committed npm lockfile:
+Node.js 24 is the repository default. Source development uses npm 11.16 through
+11.x for its strict install-script policy, and `packageManager` pins npm
+11.19.0. Use the committed npm lockfile:
 
 ```bash
 # Clone the repository
 git clone https://github.com/lsadehaan/lit-shell.git
 cd lit-shell
+corepack enable
+corepack install
 
 # Install the exact graph, then build only the reviewed binary dependencies
 npm ci
@@ -800,6 +826,8 @@ The browser suite needs the three Playwright engines once per machine:
 
 ```bash
 npx playwright install --with-deps chromium firefox webkit
+npm run pages:check
+npm run pages:check:enabled
 npm run test:e2e:browser
 ```
 

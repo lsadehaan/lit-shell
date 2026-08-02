@@ -634,6 +634,16 @@ export class LitShellTerminal extends LitElement {
 
   // Connection properties
   @property({ type: String }) url = '';
+  /** WebSocket subprotocols. Kept off attributes so capabilities are not reflected into markup. */
+  @property({ attribute: false }) protocols: string | string[] = [];
+  /** Automatic reconnect policy; declarative users opt out with `no-reconnect`. */
+  @property({
+    attribute: 'no-reconnect',
+    converter: {
+      fromAttribute: (value: string | null) => value === null,
+    },
+  })
+  reconnect = true;
   @property({ type: String }) shell = '';
   @property({ type: String }) cwd = '';
   @property({ type: Number }) cols = 80;
@@ -663,6 +673,8 @@ export class LitShellTerminal extends LitElement {
   @property({ type: Number, attribute: 'font-size' }) fontSize = 14;
   @property({ type: String, attribute: 'font-family' }) fontFamily =
     '"Cascadia Mono", "Cascadia Code", Consolas, "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", Hack, "Fira Code", "JetBrains Mono", Menlo, Monaco, "Courier New", monospace';
+  @property({ type: Boolean, attribute: 'screen-reader-mode' })
+  screenReaderMode = false;
 
   // State
   @state() private client: TerminalClient | null = null;
@@ -810,7 +822,11 @@ export class LitShellTerminal extends LitElement {
 
     try {
       const targetTab = this.showTabs ? this.getActiveTab() : undefined;
-      const client = new TerminalClient({ url: this.url });
+      const client = new TerminalClient({
+        url: this.url,
+        protocols: this.protocols,
+        reconnect: this.reconnect,
+      });
       let autoSpawnAttempted = false;
       this.client = client;
       if (targetTab) {
@@ -1052,6 +1068,13 @@ export class LitShellTerminal extends LitElement {
           this.sessionInfo = null;
           this.setStatus(`Session closed: ${reason}`, 'info');
         }
+        this.dispatchEvent(
+          new CustomEvent('session-closed', {
+            detail: { reason, sessionId },
+            bubbles: true,
+            composed: true,
+          }),
+        );
         // Refresh session list
         client.requestSessionList();
       });
@@ -1117,6 +1140,12 @@ export class LitShellTerminal extends LitElement {
     this.sessionActive = false;
     this.sessionInfo = null;
     if (this.showTabs) this.syncStateToActiveTab();
+  }
+
+  /** Forget WebSocket subprotocols after a one-use capability is consumed. */
+  clearProtocols(): void {
+    this.protocols = [];
+    this.client?.clearProtocols();
   }
 
   /**
@@ -1217,6 +1246,7 @@ export class LitShellTerminal extends LitElement {
       theme: terminalTheme,
       cols: this.cols,
       rows: this.rows,
+      screenReaderMode: this.screenReaderMode,
     });
 
     // Create fit addon
