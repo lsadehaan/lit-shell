@@ -115,8 +115,14 @@ export async function startBrowserFixture(): Promise<BrowserFixture> {
       response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
       response.end('Not found');
     } catch (error) {
-      response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-      response.end(error instanceof Error ? error.message : String(error));
+      console.error('lit-shell fixture request failed', error);
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
+      response
+        .writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+        .end('Internal server error\n');
     }
   });
 

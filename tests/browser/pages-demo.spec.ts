@@ -1,4 +1,5 @@
 import { AxeBuilder } from '@axe-core/playwright';
+import { request as httpRequest } from 'node:http';
 import type { Page, Request, Response, WebSocket } from '@playwright/test';
 import { expect, test } from './browser-test.js';
 import {
@@ -14,6 +15,17 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await fixture.close();
+});
+
+test('does not expose fixture errors in HTTP responses', async ({
+  browserName,
+}) => {
+  test.skip(browserName !== 'chromium', 'The HTTP fixture is browser-neutral');
+
+  const response = await fixtureRequest('http://[');
+  expect(response.status).toBe(500);
+  expect(response.body).toBe('Internal server error\n');
+  expect(response.body).not.toContain('Invalid URL');
 });
 
 test('loads the exact static artifact from the GitHub project subpath', async ({
@@ -185,6 +197,25 @@ async function loadDemo(page: Page, installCsp = true): Promise<void> {
   await expect
     .poll(() => demoTerminalText(page), { timeout: 15_000 })
     .toContain('guest@lit-shell:~$');
+}
+
+async function fixtureRequest(
+  path: string,
+): Promise<{ readonly body: string; readonly status: number | undefined }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(fixture.origin, { path }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk: string) => {
+        body += chunk;
+      });
+      response.once('end', () => {
+        resolve({ body, status: response.statusCode });
+      });
+    });
+    request.once('error', reject);
+    request.end();
+  });
 }
 
 async function demoTerminalText(page: Page): Promise<string> {
