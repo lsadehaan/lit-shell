@@ -4,10 +4,11 @@
     "src/server/index.ts",
     "src/client/index.ts",
     "src/ui/index.ts",
+    "demo/app.ts",
     "scripts/*.js",
     "tests/**/*.test.ts"
   ],
-  "project": ["src/**/*.ts", "scripts/*.js", "tests/**/*.ts"],
+  "project": ["demo/**/*.ts", "src/**/*.ts", "scripts/*.js", "tests/**/*.ts"],
   "ignoreExportsUsedInFile": {
     "interface": true,
     "type": true

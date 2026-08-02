@@ -9,6 +9,7 @@ export default {
     '!**/node_modules/**',
     '!**/coverage/**',
     '!**/dist/**',
+    '!**/_site/**',
     '!**/reports/**',
     '!**/test-results/**',
     '!.changeset/**',

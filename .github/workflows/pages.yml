@@ -1,0 +1,121 @@
+name: Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static demo
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Rebuild the reviewed browser-build dependency
+        run: >-
+          npm rebuild
+          --ignore-scripts=false
+          --strict-allow-scripts=true
+          esbuild
+
+      - name: Build and verify the static artifact
+        run: npm run pages:check
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload the static artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+          retention-days: 1
+          include-hidden-files: true
+
+  deploy:
+    name: Deploy static demo
+    if: ${{ success() && github.ref == 'refs/heads/master' }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+
+  verify:
+    name: Verify live demo
+    if: ${{ success() }}
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+
+    steps:
+      - name: Fetch the deployed page and application
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          case "$PAGE_URL" in
+            https://lsadehaan.github.io/lit-shell/|https://www.idnteq.net/lit-shell/) ;;
+            http://www.idnteq.net/lit-shell/)
+              PAGE_URL="https://${PAGE_URL#http://}"
+              ;;
+            *) echo "Unexpected Pages URL: $PAGE_URL" >&2; exit 1 ;;
+          esac
+          for attempt in $(seq 1 12); do
+            if curl --fail --location --retry 3 --retry-all-errors \
+              --retry-delay 2 --silent --show-error \
+              --output page.html "$PAGE_URL" \
+              && grep --quiet --fixed-strings 'Browser-only simulation' page.html \
+              && grep --quiet --fixed-strings \
+                "content=\"$BUILD_REVISION\"" page.html; then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              echo "The deployed revision did not become available" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          curl --fail --location --retry 10 --retry-all-errors \
+            --retry-delay 5 --silent --show-error \
+            --output demo.js "${PAGE_URL}assets/demo.js"
+          test -s demo.js
