@@ -317,7 +317,7 @@ test('fails closed when the human check fails without contacting the shell backe
     });
   });
   page.on('request', (request) => {
-    if (request.url().startsWith(backendOrigin)) {
+    if (new URL(request.url()).origin === backendOrigin) {
       backendRequests.push(request.url());
     }
   });
@@ -780,14 +780,30 @@ async function installTurnstileMock(
 }
 
 function turnstileMockSource(autoComplete = true): string {
+  if (autoComplete) {
+    return `
+    window.turnstile = {
+      render(container, options) {
+        window.__turnstileConfig = options;
+        const marker = document.createElement('p');
+        marker.textContent = 'Human check complete';
+        container.replaceChildren(marker);
+        queueMicrotask(() => options.callback('turnstile-test-token'));
+        return 'test-widget';
+      },
+      remove() {
+        window.__turnstileRemoved = (window.__turnstileRemoved || 0) + 1;
+      }
+    };
+  `;
+  }
   return `
     window.turnstile = {
       render(container, options) {
         window.__turnstileConfig = options;
         const marker = document.createElement('p');
-        marker.textContent = 'Human check ${autoComplete ? 'complete' : 'pending'}';
+        marker.textContent = 'Human check pending';
         container.replaceChildren(marker);
-        ${autoComplete ? `queueMicrotask(() => options.callback(${JSON.stringify(turnstileToken)}));` : ''}
         return 'test-widget';
       },
       remove() {
