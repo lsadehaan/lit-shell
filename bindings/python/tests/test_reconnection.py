@@ -37,6 +37,7 @@ def _lit_shell_tasks() -> list[asyncio.Task[Any]]:
         ({"reconnect_delay": -0.1}, ValueError),
         ({"reconnect_delay": float("inf")}, ValueError),
         ({"reconnect_delay": float("nan")}, ValueError),
+        ({"reconnect_delay": 10**400}, ValueError),
         ({"connect_timeout": True}, TypeError),
         ({"connect_timeout": 0}, ValueError),
         ({"connect_timeout": float("inf")}, ValueError),

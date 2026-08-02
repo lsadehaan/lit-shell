@@ -44,6 +44,7 @@ try {
         '--prefix',
         directory,
         '--package-lock-only',
+        '--install-links',
         '--ignore-scripts',
       ],
       { cwd: projectRoot, stdio: 'inherit' },
@@ -55,7 +56,9 @@ try {
     await rm(entry.lockBackup);
     entry.lockMoved = false;
   }
-  console.log('Refreshed example lockfiles from their package manifests.');
+  console.log(
+    'Refreshed example lockfiles with packed local package dependencies.',
+  );
 } catch (error) {
   for (const entry of locks) {
     await restoreModules(entry);

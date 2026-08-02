@@ -29,6 +29,9 @@ interface TerminalServerLike {
 
 const repositoryRoot = resolve(process.cwd());
 const distributionRoot = resolve(repositoryRoot, 'dist');
+// Keep this non-literal so type-checking a clean checkout does not require the
+// generated distribution. Browser tests build it before starting the fixture.
+const terminalServerModulePath = '../../../dist/server/index.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -38,12 +41,13 @@ const contentTypes: Record<string, string> = {
 };
 
 export async function startBrowserFixture(): Promise<BrowserFixture> {
-  const { TerminalServer } =
-    (await import('../../../dist/server/index.js')) as unknown as {
-      TerminalServer: new (
-        options: Record<string, unknown>,
-      ) => TerminalServerLike;
-    };
+  const { TerminalServer } = (await import(
+    terminalServerModulePath
+  )) as unknown as {
+    TerminalServer: new (
+      options: Record<string, unknown>,
+    ) => TerminalServerLike;
+  };
 
   const backend = createServer((_request, response) => {
     response.writeHead(404).end();
@@ -198,7 +202,9 @@ export async function startBrowserFixture(): Promise<BrowserFixture> {
           (socket) =>
             new Promise<void>((resolveClose) => {
               socket.once('close', () => resolveClose());
-              socket.close(1012, 'fixture transport restart');
+              // 1001 models a proxy or server going away without making WebKit
+              // report the deliberate shutdown as a failed HTTP upgrade.
+              socket.close(1001, 'fixture transport restart');
             }),
         ),
       );

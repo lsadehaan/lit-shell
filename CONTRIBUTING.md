@@ -45,12 +45,23 @@ resulting `package-lock.json` update with the manifest change. Do not use
 Install-time scripts are an explicit supply-chain boundary. `.npmrc` disables
 all lifecycle scripts during install; `npm run deps:build` deliberately
 overrides that setting only while rebuilding the reviewed `esbuild` and
-`node-pty` packages. `package.json` also records their exact reviewed versions
-in npm's `allowScripts` ledger, and strict policy turns an unreviewed script
-into a hard failure. After a dependency change, use npm 11.19 or newer to run
-`npm approve-scripts --allow-scripts-pending`; inspect and approve only scripts
-the project genuinely needs, then update the explicit rebuild command if the
-approved set truly changes.
+`node-pty` packages. `package.json` records exact reviewed versions for every
+install-script dependency in npm's `allowScripts` ledger, including optional
+Darwin-only `fsevents` packages. An approval grants permission but does not
+require execution: `deps:build` remains intentionally narrower and runs only
+scripts the build and runtime need. Strict policy turns an unreviewed script
+into a hard failure, and `deps:scripts:check` rejects missing, stale, or
+unpinned approvals. After a dependency change, use npm 11.19 or newer to run
+`npm install-scripts ls`; inspect and approve only scripts the project genuinely
+needs, then update the explicit rebuild command only when a required script
+changes.
+
+The examples use `file:../..` to exercise the current checkout. Always install
+their locks with `--install-links --ignore-scripts`: packing the local package
+keeps each example's runtime graph isolated from the checkout's development
+dependencies, while the following `deps:build` command enables only the exact
+reviewed native script. Each example's `.npmrc` enforces the same defaults for
+plain npm commands.
 
 Useful commands:
 

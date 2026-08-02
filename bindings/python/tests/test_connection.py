@@ -67,6 +67,23 @@ async def test_connect_rejects_a_non_server_info_handshake(server_factory) -> No
 
 
 @pytest.mark.asyncio
+async def test_connect_rejects_malformed_server_info(server_factory) -> None:
+    server = await server_factory(send_info_on_connect=False)
+    client = TerminalClient(server.url, reconnect=False)
+    task = asyncio.create_task(client.connect())
+
+    try:
+        await server.wait_connected()
+        await server.send({"type": "serverInfo", "info": []})
+        with pytest.raises(RuntimeError, match=r"serverInfo\.info must be an object"):
+            await asyncio.wait_for(task, CONTRACT_TIMEOUT)
+        assert not client.is_connected()
+    finally:
+        await cancel_and_wait(task)
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_async_context_manager_closes_the_websocket(contract_server) -> None:
     client = TerminalClient(contract_server.url, reconnect=False)
 

@@ -27,12 +27,17 @@ start the server:
 npm ci --prefix ../..
 npm run deps:build --prefix ../..
 npm run build --prefix ../..
-npm ci
+npm ci --install-links --ignore-scripts
 npm run deps:build
 npm start
 ```
 
 Open <http://127.0.0.1:3000>. To try multiplexing:
+
+`--install-links` and the example-local `.npmrc` pack the checkout into this
+example's dependency tree instead of symlinking its development dependencies.
+Lifecycle scripts stay disabled until `deps:build` runs the exact reviewed
+`node-pty` scripts under strict npm policy.
 
 1. Create a local shell in the first browser tab.
 2. Generate some output.

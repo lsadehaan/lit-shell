@@ -136,6 +136,34 @@ async def test_standard_spawned_response_completes_spawn(
     assert request["options"]["allowJoin"] is False
 
 
+@pytest.mark.asyncio
+async def test_spawn_rejects_response_without_a_session_id(server_factory) -> None:
+    server = await server_factory(auto_respond=False)
+    client = TerminalClient(server.url, reconnect=False)
+    await client.connect()
+    spawning = asyncio.create_task(client.spawn(shell="/bin/sh"))
+
+    try:
+        await server.next_message("spawn")
+        await server.send(
+            {
+                "type": "spawned",
+                "shell": "/bin/sh",
+                "cwd": "/work",
+                "cols": 80,
+                "rows": 24,
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="did not include a sessionId"):
+            await asyncio.wait_for(spawning, CONTRACT_TIMEOUT)
+        assert not client.has_active_session()
+        assert client.is_connected()
+    finally:
+        await cancel_and_wait(spawning)
+        await client.disconnect()
+
+
 async def _spawn_for_io(client) -> None:
     await asyncio.wait_for(client.spawn(shell="/bin/sh", cwd="/work"), CONTRACT_TIMEOUT)
 

@@ -52,7 +52,7 @@
     "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:quality-policy": "node --test tests/quality-baseline-policy.test.js",
+    "test:quality-policy": "node --test tests/quality-baseline-policy.test.js tests/install-script-policy.test.js",
     "test:e2e:protocol": "vitest run tests/e2e",
     "test:e2e:browser": "playwright test",
     "test:examples": "node --test examples/shared/http.test.js",
@@ -107,6 +107,8 @@
   "packageManager": "npm@11.19.0",
   "allowScripts": {
     "esbuild@0.28.1": true,
+    "fsevents@2.3.2": true,
+    "fsevents@2.3.3": true,
     "node-pty@1.1.0": true
   },
   "dependencies": {

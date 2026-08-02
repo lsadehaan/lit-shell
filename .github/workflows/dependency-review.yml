@@ -30,6 +30,6 @@ jobs:
           fail-on-scopes: runtime, development
           license-check: true
           allow-licenses: >-
-            0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause,
+            0BSD, Apache-2.0, BSD-2-Clause, BSD-2-Clause-Views, BSD-3-Clause,
             BlueOak-1.0.0, ISC, MIT, MPL-2.0, Python-2.0
           show-patched-versions: true

@@ -21,7 +21,7 @@ containers.
 npm ci --prefix ../..
 npm run deps:build --prefix ../..
 npm run build --prefix ../..
-npm ci
+npm ci --install-links --ignore-scripts
 npm run deps:build
 docker run --detach --name test-container alpine:3.23.5 sleep infinity
 npm start
@@ -29,6 +29,10 @@ npm start
 
 Open <http://127.0.0.1:3000>, select `test-container`, and start a session.
 The browser assets come from the local build rather than a third-party CDN.
+`--install-links` and the example-local `.npmrc` pack the checkout into this
+example's dependency tree instead of symlinking its development dependencies.
+Lifecycle scripts stay disabled until `deps:build` runs the exact reviewed
+`node-pty` scripts under strict npm policy.
 
 The server accepts only container names matching `test-*`, uses `/bin/sh`,
 keeps verbose logging off, enforces short session/count limits, and disables

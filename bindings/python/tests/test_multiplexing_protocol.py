@@ -57,6 +57,24 @@ async def test_session_list_response_is_decoded_without_request_ids(
 
 
 @pytest.mark.asyncio
+async def test_invalid_session_timestamp_is_tolerated(server_factory) -> None:
+    server = await server_factory(
+        sessions=[{**SESSION, "createdAt": "not-a-timestamp"}]
+    )
+    client = TerminalClient(server.url, reconnect=False)
+
+    try:
+        await client.connect()
+        sessions = await asyncio.wait_for(client.list_sessions(), CONTRACT_TIMEOUT)
+
+        assert len(sessions) == 1
+        assert sessions[0].session_id == SESSION["sessionId"]
+        assert sessions[0].created_at is None
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_join_request_and_history_follow_the_wire_contract(
     connected_client, contract_server
 ) -> None:
@@ -120,6 +138,23 @@ async def test_leave_preserves_the_server_session(
 
 
 @pytest.mark.asyncio
+async def test_leave_for_another_session_preserves_the_active_session(
+    connected_client, contract_server
+) -> None:
+    await asyncio.wait_for(
+        connected_client.join(SESSION["sessionId"]), CONTRACT_TIMEOUT
+    )
+    await contract_server.next_message("join")
+
+    connected_client.leave("term-observed-elsewhere")
+    assert await contract_server.next_message("leave") == {
+        "type": "leave",
+        "sessionId": "term-observed-elsewhere",
+    }
+    assert connected_client.get_session_id() == SESSION["sessionId"]
+
+
+@pytest.mark.asyncio
 async def test_join_error_rejects_the_matching_operation(connected_client) -> None:
     with pytest.raises(RuntimeError, match="Session not found"):
         await asyncio.wait_for(connected_client.join("term-missing"), CONTRACT_TIMEOUT)
@@ -168,3 +203,58 @@ async def test_same_type_requests_resolve_in_request_order(server_factory) -> No
     finally:
         await cancel_and_wait(first)
         await cancel_and_wait(second)
+
+
+@pytest.mark.asyncio
+async def test_advertised_request_ids_correlate_out_of_order_errors(
+    server_factory,
+) -> None:
+    server = await server_factory(auto_respond=False)
+    client = TerminalClient(server.url, reconnect=False)
+    advertised_request_ids: list[bool] = []
+    request_ids_enabled = asyncio.Event()
+
+    def on_server_info(info) -> None:
+        advertised_request_ids.append(info.request_ids)
+        if info.request_ids:
+            request_ids_enabled.set()
+
+    client.on_server_info(on_server_info)
+    await client.connect()
+    await server.send({"type": "serverInfo", "info": {"requestIds": True}})
+    await asyncio.wait_for(request_ids_enabled.wait(), CONTRACT_TIMEOUT)
+
+    first = asyncio.create_task(client.list_sessions())
+    first_request = await server.next_message("listSessions")
+    second = asyncio.create_task(client.list_sessions())
+    second_request = await server.next_message("listSessions")
+
+    try:
+        assert first_request["requestId"] == "req-1"
+        assert second_request["requestId"] == "req-2"
+
+        await server.send(
+            {
+                "type": "error",
+                "requestId": second_request["requestId"],
+                "error": "second request rejected",
+            }
+        )
+        with pytest.raises(RuntimeError, match="second request rejected"):
+            await asyncio.wait_for(second, CONTRACT_TIMEOUT)
+
+        await server.send(
+            {
+                "type": "sessionList",
+                "requestId": first_request["requestId"],
+                "sessions": [SESSION],
+            }
+        )
+        first_result = await asyncio.wait_for(first, CONTRACT_TIMEOUT)
+
+        assert first_result[0].session_id == SESSION["sessionId"]
+        assert advertised_request_ids == [False, True]
+    finally:
+        await cancel_and_wait(first)
+        await cancel_and_wait(second)
+        await client.disconnect()

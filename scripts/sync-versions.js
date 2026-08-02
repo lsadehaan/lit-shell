@@ -98,20 +98,23 @@ if (!write) {
     const lock = JSON.parse(
       await readFile(resolve(projectRoot, lockPath), 'utf8'),
     );
-    const linkedManifest = lock.packages?.['../..'];
+    const packedManifest = lock.packages?.['node_modules/lit-shell.js'];
     const dependencyFields = [
       'dependencies',
-      'devDependencies',
       'optionalDependencies',
       'peerDependencies',
       'peerDependenciesMeta',
     ];
     if (
-      linkedManifest?.version !== version ||
+      packedManifest?.version !== version ||
+      packedManifest?.resolved !== 'file:../..' ||
+      packedManifest?.link === true ||
+      packedManifest?.devDependencies !== undefined ||
+      lock.packages?.['../..'] !== undefined ||
       dependencyFields.some(
         (field) =>
           !isDeepStrictEqual(
-            linkedManifest?.[field] ?? {},
+            packedManifest?.[field] ?? {},
             packageManifest[field] ?? {},
           ),
       )
@@ -127,6 +130,6 @@ if (stale.length === 0) {
   console.log(`Synchronized ${stale.join(', ')} to ${version}.`);
 } else {
   throw new Error(
-    `Public versions or linked example package metadata do not match package.json ${version}: ${stale.join(', ')}. Refresh the affected markers and npm lockfiles.`,
+    `Public versions or packed example package metadata do not match package.json ${version}: ${stale.join(', ')}. Refresh the affected markers and npm lockfiles.`,
   );
 }

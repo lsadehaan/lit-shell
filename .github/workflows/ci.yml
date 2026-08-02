@@ -345,10 +345,10 @@ jobs:
 
       - name: Install and audit independent examples
         run: |
-          npm ci --prefix examples/docker-container --ignore-scripts
+          npm ci --prefix examples/docker-container --install-links --ignore-scripts
           npm run --prefix examples/docker-container deps:build
           npm audit --prefix examples/docker-container --audit-level=high
-          npm ci --prefix examples/multiplexing --ignore-scripts
+          npm ci --prefix examples/multiplexing --install-links --ignore-scripts
           npm run --prefix examples/multiplexing deps:build
           npm audit --prefix examples/multiplexing --audit-level=high
 
@@ -459,3 +459,51 @@ jobs:
             --env LIT_SHELL_SMOKE_ORIGIN=http://127.0.0.1:3000 \
             --env LIT_SHELL_SMOKE_CONTAINER="$target_name" \
             "$server_name" node tests/docker-protocol-smoke.mjs
+
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - node-compatibility
+      - os-compatibility
+      - quality
+      - browser-e2e
+      - python-contract
+      - python-node-e2e
+      - package-integrity
+      - container-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          NODE_COMPATIBILITY_RESULT: ${{ needs['node-compatibility'].result }}
+          OS_COMPATIBILITY_RESULT: ${{ needs['os-compatibility'].result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          BROWSER_E2E_RESULT: ${{ needs['browser-e2e'].result }}
+          PYTHON_CONTRACT_RESULT: ${{ needs['python-contract'].result }}
+          PYTHON_NODE_E2E_RESULT: ${{ needs['python-node-e2e'].result }}
+          PACKAGE_INTEGRITY_RESULT: ${{ needs['package-integrity'].result }}
+          CONTAINER_INTEGRITY_RESULT: ${{ needs['container-integrity'].result }}
+        run: |
+          results=(
+            "node-compatibility=$NODE_COMPATIBILITY_RESULT"
+            "os-compatibility=$OS_COMPATIBILITY_RESULT"
+            "quality=$QUALITY_RESULT"
+            "browser-e2e=$BROWSER_E2E_RESULT"
+            "python-contract=$PYTHON_CONTRACT_RESULT"
+            "python-node-e2e=$PYTHON_NODE_E2E_RESULT"
+            "package-integrity=$PACKAGE_INTEGRITY_RESULT"
+            "container-integrity=$CONTAINER_INTEGRITY_RESULT"
+          )
+          gate_failed=0
+          for entry in "${results[@]}"; do
+            job_name="${entry%%=*}"
+            job_result="${entry#*=}"
+            echo "$job_name: $job_result"
+            if [ "$job_result" != 'success' ]; then
+              gate_failed=1
+            fi
+          done
+          exit "$gate_failed"

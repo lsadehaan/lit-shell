@@ -71,7 +71,7 @@ async def test_protocol_events_decode_documented_fields(
 
 
 @pytest.mark.asyncio
-async def test_bad_json_and_a_raising_handler_do_not_stop_later_events(
+async def test_malformed_unknown_messages_and_raising_handler_do_not_stop_events(
     connected_client, contract_server
 ) -> None:
     await asyncio.wait_for(
@@ -92,6 +92,8 @@ async def test_bad_json_and_a_raising_handler_do_not_stop_later_events(
     connected_client.on_data(healthy_handler)
 
     await contract_server.send_raw("not valid JSON")
+    await contract_server.send_raw("[]")
+    await contract_server.send({"type": "futureExtension", "value": "ignored"})
     await contract_server.send(
         {"type": "data", "sessionId": SESSION["sessionId"], "data": "still-alive"}
     )
