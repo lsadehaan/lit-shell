@@ -1,0 +1,52 @@
+name: Question or support request
+description: Ask a focused usage or integration question
+title: '[Question]: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support is provided by the community on a best-effort basis. Read SUPPORT.md first. Report vulnerabilities privately according to SECURITY.md.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to accomplish?
+      description: Explain the desired outcome and relevant application context.
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Link the documentation you followed and include a minimal sanitized configuration or code sample.
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and environment
+      description: Include lit-shell.js and relevant Node.js, browser, Python, operating-system, or container versions.
+      placeholder: 'lit-shell.js 1.2.1, Node.js 22, Ubuntu 24.04'
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Relevant output
+      description: Include the smallest useful error or output excerpt, with all credentials and sensitive terminal data removed.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I read the README, SUPPORT.md, and relevant examples.
+          required: true
+        - label: I searched open and closed issues for an answer.
+          required: true
+        - label: I have not included credentials, private terminal output, or unpublished vulnerability details.
+          required: true

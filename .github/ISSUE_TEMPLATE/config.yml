@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/lsadehaan/lit-shell/security/advisories/new
+    about: Send unpublished vulnerability details privately to the maintainers.
+  - name: Read the documentation
+    url: https://github.com/lsadehaan/lit-shell/blob/master/README.md
+    about: Review setup, configuration, API, and example documentation before opening an issue.

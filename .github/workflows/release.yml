@@ -1,118 +1,194 @@
-name: Release & Publish
+name: Release
 
 on:
   push:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  test:
-    name: Run Tests
+  verify:
+    name: Verify and pack release
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20.x'
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          package-manager-cache: false
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install the repository npm version
+        run: npm install --global npm@11.19.0
 
-    - name: Run build
-      run: npm run build
+      - name: Verify release ancestry and choose quality base
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/master; then
+            echo 'Release tags must identify a commit already merged into master.' >&2
+            exit 1
+          fi
 
-    - name: Run tests
-      run: npm test
+          previous_release="$(git tag --merged "${RELEASE_SHA}^" \
+            --sort=-version:refname --list 'v[0-9]*.[0-9]*.[0-9]*' | sed -n '1p')"
+          quality_base="${previous_release:-${RELEASE_SHA}^}"
+          git rev-parse --verify "${quality_base}^{commit}"
+          echo "QUALITY_BASE_REF=$quality_base" >> "$GITHUB_ENV"
+
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          node --input-type=module --eval
+          "import { readFileSync } from 'node:fs';
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const expected = 'v' + version;
+          if (process.env.RELEASE_TAG !== expected) {
+            console.error('Tag ' + process.env.RELEASE_TAG + ' does not match ' + expected);
+            process.exit(1);
+          }"
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts && npm run deps:build
+
+      - name: Audit release dependencies
+        run: npm audit --audit-level=high
+
+      - name: Verify dependency install-script policy
+        run: npm run deps:scripts:check
+
+      - name: Run complete release verification
+        run: npm run release:verify
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run black-box browser tests
+        run: npm run test:e2e:browser
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: bindings/python/pyproject.toml
+
+      - name: Verify Python package quality and protocol compatibility
+        working-directory: bindings/python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m mypy
+          python -m pytest --cov=lit_shell --cov-branch --cov-report=term-missing
+          python -m pip_audit .
+          mkdir -p ../../release-artifacts
+          python -m build --sdist --wheel --outdir ../../release-artifacts
+
+      - name: Pack the exact release candidate, checksum, and SBOM
+        run: |
+          mkdir -p release-artifacts
+          npm pack --pack-destination release-artifacts
+          npm sbom --omit=dev --sbom-format cyclonedx > release-artifacts/sbom.cdx.json
+          (cd release-artifacts && sha256sum *.tgz *.tar.gz *.whl sbom.cdx.json > SHA256SUMS)
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
 
   publish-npm:
-    name: Publish to NPM
-    needs: test
+    name: Publish trusted npm artifact
+    needs: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      id-token: write  # Required for Trusted Publishing OIDC
       contents: read
+      id-token: write
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Set up Node.js 24 and npm registry
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20.x'
-        registry-url: 'https://registry.npmjs.org'
+      - name: Install trusted-publishing npm version
+        run: npm install --global npm@11.19.0
 
-    - name: Upgrade npm to latest
-      run: npm install -g npm@latest
+      - name: Download verified release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: release-artifacts
 
-    - name: Install dependencies
-      run: npm install
+      - name: Publish with OIDC and provenance
+        run: |
+          set -euo pipefail
+          candidates=(release-artifacts/*.tgz)
+          test "${#candidates[@]}" -eq 1
+          candidate="${candidates[0]}"
+          version="${GITHUB_REF_NAME#v}"
+          local_integrity="sha512-$(openssl dgst -sha512 -binary "$candidate" | openssl base64 -A)"
 
-    - name: Build
-      run: npm run build
+          if published_integrity="$(npm view "lit-shell.js@$version" dist.integrity 2>/dev/null)"; then
+            if [ "$published_integrity" != "$local_integrity" ]; then
+              echo "Published lit-shell.js@$version does not match the verified artifact." >&2
+              exit 1
+            fi
+            echo "lit-shell.js@$version is already published with the verified integrity."
+          else
+            npm publish "$candidate" --access public --provenance
+          fi
 
-    - name: Publish to NPM
-      run: npm publish --provenance --access public
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  create-release:
-    name: Create GitHub Release
+  github-release:
+    name: Create GitHub release
     needs: publish-npm
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: write  # Required to create releases
+      contents: write
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Download published artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: release-artifacts
 
-    - name: Extract version from tag
-      id: version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-    - name: Create GitHub Release
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        gh release create ${{ github.ref_name }} \
-          --title "Release v${{ steps.version.outputs.VERSION }}" \
-          --notes "$(cat <<'EOF'
-        ## 🐚 lit-shell.js v${{ steps.version.outputs.VERSION }}
-
-        The truth is in your shell!
-
-        ### 📦 Installation
-
-        ```bash
-        npm install lit-shell.js node-pty
-        ```
-
-        ### ✨ What's New
-
-        See commit history for changes.
-
-        ### 🚀 Quick Start
-
-        ```html
-        <lit-shell-terminal
-          url="ws://localhost:3000/terminal"
-          theme="dark"
-          auto-connect
-          auto-spawn
-        ></lit-shell-terminal>
-        ```
-
-        ### 📚 Documentation
-
-        - [README](https://github.com/${{ github.repository }}/blob/master/README.md)
-
-        ### 🐛 Bug Reports
-
-        Report issues at https://github.com/${{ github.repository }}/issues
-        EOF
-        )"
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-artifacts/* \
+              --repo "$RELEASE_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" release-artifacts/* \
+              --repo "$RELEASE_REPOSITORY" \
+              --title "lit-shell.js $RELEASE_TAG" \
+              --generate-notes \
+              --verify-tag
+          fi

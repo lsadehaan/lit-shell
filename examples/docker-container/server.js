@@ -1,101 +1,117 @@
-/**
- * lit-shell Docker Container Example
- *
- * This example demonstrates how to use lit-shell to connect to Docker containers.
- *
- * Prerequisites:
- * - Docker installed and running
- * - node-pty installed: npm install node-pty
- *
- * Usage:
- * 1. Start a test container: docker run -d --name test-container alpine sleep infinity
- * 2. Run this server: node server.js
- * 3. Open index.html in your browser
- */
+import { createServer } from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { createServer } from 'http';
-import { readFileSync, existsSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
 import { TerminalServer } from 'lit-shell.js/server';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = join(__dirname, '../..');
+import {
+  parseAllowedOrigins,
+  parsePort,
+  parseRequestPath,
+  reportRequestFailure,
+  sendFile,
+  sendJson,
+  sendText,
+} from '../shared/http.js';
 
-// Create HTTP server
-const server = createServer((req, res) => {
-  console.log(`[HTTP] ${req.method} ${req.url}`);
+const exampleDirectory = dirname(fileURLToPath(import.meta.url));
+const distDirectory = resolve(exampleDirectory, '../../dist');
+const exampleAssets = new Set(['/app.js', '/index.html', '/style.css']);
 
-  if (req.url === '/' || req.url === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(readFileSync(join(__dirname, 'index.html')));
-  }
-  // Serve source map if requested (for debugging)
-  else if (req.url === '/dist/ui/browser-bundle.js.map') {
-    const file = join(rootDir, 'dist/ui/browser-bundle.js.map');
-    if (existsSync(file)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(readFileSync(file));
-    } else {
-      res.writeHead(404);
-      res.end('Source map not found');
-    }
-  }
-  else {
-    res.writeHead(404);
-    res.end('Not found');
-  }
-});
-
-// Create terminal server with Docker support enabled
+const host = process.env.HOST ?? '127.0.0.1';
+const port = parsePort(process.env.PORT);
+const allowedOrigins = parseAllowedOrigins(
+  process.env.LIT_SHELL_ALLOWED_ORIGINS,
+  port,
+);
+const verbose = process.env.LIT_SHELL_VERBOSE === 'true';
 const terminalServer = new TerminalServer({
-  // Enable Docker exec feature
+  allowedOrigins,
+  allowLocalExec: false,
   allowDockerExec: true,
-
-  // Allow containers matching these patterns
-  // Empty array means all containers are allowed
-  allowedContainerPatterns: [
-    '^test-',        // Containers starting with 'test-'
-    'demo',          // Containers containing 'demo'
-    '^alpine$',      // Exact match 'alpine'
-  ],
-
-  // Default shell for containers
+  allowedContainerPatterns: ['^test-[a-z0-9][a-z0-9_.-]*$'],
   defaultContainerShell: '/bin/sh',
 
-  // Also allow local shell for comparison
-  allowedShells: ['/bin/bash', '/bin/sh'],
-  allowedPaths: [process.cwd()],
-
-  // Session settings
-  maxSessionsPerClient: 3,
-  idleTimeout: 10 * 60 * 1000, // 10 minutes
-
-  // Enable logging
-  verbose: true,
+  maxClientsPerSession: 3,
+  maxSessionsPerClient: 2,
+  maxSessionsTotal: 6,
+  orphanTimeout: 30_000,
+  idleTimeout: 10 * 60_000,
+  verbose,
 });
 
-// Attach to HTTP server
+async function handleRequest(request, response) {
+  const pathname = parseRequestPath(request, response);
+  if (pathname === null) return;
+
+  if (pathname === '/healthz') {
+    sendJson(request, response, 200, { status: 'ok' });
+    return;
+  }
+
+  if (pathname === '/') {
+    await sendFile(request, response, {
+      root: exampleDirectory,
+      pathname: '/index.html',
+    });
+    return;
+  }
+
+  if (exampleAssets.has(pathname)) {
+    await sendFile(request, response, { root: exampleDirectory, pathname });
+    return;
+  }
+
+  if (pathname.startsWith('/dist/')) {
+    await sendFile(request, response, {
+      root: distDirectory,
+      pathname: pathname.slice('/dist'.length),
+    });
+    return;
+  }
+
+  sendText(request, response, 404, 'Not found\n');
+}
+
+const server = createServer((request, response) => {
+  handleRequest(request, response).catch((error) => {
+    reportRequestFailure(response, error);
+  });
+});
+
+server.on('clientError', (_error, socket) => {
+  socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+});
 terminalServer.attach(server);
 
-const PORT = 3000;
-server.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════╗
-║           lit-shell Docker Container Example                     ║
-╠═══════════════════════════════════════════════════════════════╣
-║                                                               ║
-║  Server running at: http://localhost:${PORT}                    ║
-║  WebSocket endpoint: ws://localhost:${PORT}/terminal            ║
-║                                                               ║
-║  To test Docker exec:                                         ║
-║  1. Start a test container:                                   ║
-║     docker run -d --name test-container alpine sleep infinity ║
-║                                                               ║
-║  2. Open http://localhost:${PORT} in your browser               ║
-║                                                               ║
-║  3. Enter 'test-container' as the container name              ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
-  `);
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[example] ${signal} received; shutting down`);
+  terminalServer.close();
+  server.close((error) => {
+    process.exitCode = error ? 1 : 0;
+  });
+  setTimeout(() => process.exit(1), 5_000).unref();
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+server.listen(port, host, () => {
+  const displayHost = host.includes(':') ? `[${host}]` : host;
+  const origin = `http://${displayHost}:${port}`;
+  console.log(`[example] Docker demo: ${origin}`);
+  console.log(
+    `[example] WebSocket endpoint: ws://${displayHost}:${port}/terminal`,
+  );
+  console.warn(
+    '[example] Docker socket access is host-equivalent; use only test-* containers.',
+  );
+  if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
+    console.warn(
+      '[example] WARNING: this unauthenticated demo is listening beyond loopback.',
+    );
+  }
 });

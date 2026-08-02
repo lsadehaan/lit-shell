@@ -1,0 +1,94 @@
+name: Bug report
+description: Report reproducible behavior that appears to be incorrect
+title: '[Bug]: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. Search existing issues first and keep security vulnerabilities private according to SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: lit-shell.js version
+      description: Provide the exact npm or Python package version, or a commit SHA.
+      placeholder: '1.2.1'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Server and session management
+        - JavaScript client
+        - Web component and browser UI
+        - Python binding
+        - Docker or examples
+        - Build, packaging, or documentation
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant Node.js, browser, Python, operating-system, and container versions.
+      placeholder: 'Node.js 22.12, Chromium 131, Ubuntu 24.04'
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide a small repository, code sample, or exact sequence that reproduces the issue. Avoid real credentials and terminal history.
+      placeholder: |
+        1. Configure the server with ...
+        2. Connect a client with ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What observable behavior did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include frequency and timing when relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or diagnostics
+      description: Paste only the smallest relevant excerpt. Remove tokens, credentials, hostnames, usernames, and sensitive terminal content.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include regressions, workarounds, screenshots, or related issues if useful.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues for an existing report.
+          required: true
+        - label: I have not included credentials, private terminal output, or unpublished vulnerability details.
+          required: true
+        - label: I can reproduce this with a supported version or current `master`.
+          required: true

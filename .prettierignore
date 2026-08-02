@@ -1,0 +1,12 @@
+coverage/
+dist/
+node_modules/
+package-lock.json
+playwright-report/
+reports/
+test-results/
+src/ui/xterm-styles.generated.ts
+.claude/
+CLAUDE.md
+github-issues-plan.md
+status.md

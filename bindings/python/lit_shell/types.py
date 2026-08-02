@@ -3,8 +3,20 @@ Type definitions for lit-shell Python client.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Literal
 from datetime import datetime
+from typing import Literal, Optional
+
+
+@dataclass
+class ServerInfo:
+    """Capabilities advertised by the server during connection setup."""
+
+    local_enabled: bool = True
+    docker_enabled: bool = False
+    allowed_shells: list[str] = field(default_factory=list)
+    default_shell: str = "/bin/bash"
+    default_container_shell: str = "/bin/bash"
+    request_ids: bool = False
 
 
 @dataclass
@@ -37,6 +49,7 @@ class SharedSessionInfo:
     accepting: bool = True
     container: Optional[str] = None
     created_at: Optional[datetime] = None
+    history_enabled: bool = True
 
 
 @dataclass
@@ -47,7 +60,7 @@ class TerminalOptions:
     cwd: Optional[str] = None
     cols: int = 80
     rows: int = 24
-    env: dict = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=dict)
 
     # Docker options
     container: Optional[str] = None
@@ -58,7 +71,7 @@ class TerminalOptions:
 
     # Multiplexing options
     label: Optional[str] = None
-    allow_join: bool = True
+    allow_join: bool = False
     enable_history: bool = True
 
 

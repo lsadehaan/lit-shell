@@ -5,8 +5,11 @@ import { SessionManager } from '../src/server/session-manager.js';
 function createMockWebSocket(): any {
   return {
     readyState: 1, // WebSocket.OPEN
+    bufferedAmount: 0,
     send: vi.fn(),
     close: vi.fn(),
+    once: vi.fn(),
+    terminate: vi.fn(),
   };
 }
 
@@ -31,11 +34,29 @@ describe('SessionManager', () => {
       historySize: 1000,
       historyEnabled: true,
       maxSessionsTotal: 10,
+      maxBufferedOutputBytes: 1024,
       verbose: false,
     });
   });
 
   describe('Session Creation', () => {
+    it('rejects a per-session orphan timeout that would overflow a timer', () => {
+      expect(() =>
+        manager.createSession({
+          id: 'invalid-orphan-timeout',
+          type: 'local',
+          pty: createMockPty(),
+          shell: '/bin/bash',
+          cwd: '/',
+          cols: 80,
+          rows: 24,
+          ownerId: 'client-1',
+          ownerWs: createMockWebSocket(),
+          orphanTimeout: 2_147_483_648,
+        }),
+      ).toThrow(/orphanTimeout/);
+    });
+
     it('should create a session', () => {
       const ws = createMockWebSocket();
       const pty = createMockPty();
@@ -110,6 +131,7 @@ describe('SessionManager', () => {
         rows: 24,
         ownerId: 'client-1',
         ownerWs: ws1,
+        allowJoin: true,
       });
 
       const success = manager.addClient('session-1', 'client-2', ws2);
@@ -154,6 +176,7 @@ describe('SessionManager', () => {
         rows: 24,
         ownerId: 'client-1',
         ownerWs: ws1,
+        allowJoin: true,
       });
 
       manager.addClient('session-1', 'client-2', ws2);
@@ -213,6 +236,7 @@ describe('SessionManager', () => {
         rows: 24,
         ownerId: 'client-1',
         ownerWs: ws1,
+        allowJoin: true,
       });
 
       manager.addClient('session-1', 'client-2', ws2);
@@ -220,9 +244,15 @@ describe('SessionManager', () => {
 
       manager.broadcastToSession('session-1', { type: 'test', data: 'hello' });
 
-      expect(ws1.send).toHaveBeenCalledWith(JSON.stringify({ type: 'test', data: 'hello' }));
-      expect(ws2.send).toHaveBeenCalledWith(JSON.stringify({ type: 'test', data: 'hello' }));
-      expect(ws3.send).toHaveBeenCalledWith(JSON.stringify({ type: 'test', data: 'hello' }));
+      expect(ws1.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'test', data: 'hello' }),
+      );
+      expect(ws2.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'test', data: 'hello' }),
+      );
+      expect(ws3.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'test', data: 'hello' }),
+      );
     });
 
     it('should exclude specified client from broadcast', () => {
@@ -239,6 +269,7 @@ describe('SessionManager', () => {
         rows: 24,
         ownerId: 'client-1',
         ownerWs: ws1,
+        allowJoin: true,
       });
 
       manager.addClient('session-1', 'client-2', ws2);
@@ -247,6 +278,37 @@ describe('SessionManager', () => {
 
       expect(ws1.send).not.toHaveBeenCalled();
       expect(ws2.send).toHaveBeenCalled();
+    });
+
+    it('disconnects and detaches a slow client without blocking healthy clients', () => {
+      const healthy = createMockWebSocket();
+      const slow = createMockWebSocket();
+      slow.bufferedAmount = 1_020;
+
+      manager.createSession({
+        id: 'session-1',
+        type: 'local',
+        pty: createMockPty(),
+        shell: '/bin/bash',
+        cwd: '/',
+        cols: 80,
+        rows: 24,
+        ownerId: 'healthy-client',
+        ownerWs: healthy,
+        allowJoin: true,
+      });
+      manager.addClient('session-1', 'slow-client', slow);
+
+      manager.broadcastToSession('session-1', { type: 'data', data: 'hello' });
+
+      expect(healthy.send).toHaveBeenCalledOnce();
+      expect(slow.send).not.toHaveBeenCalled();
+      expect(slow.close).toHaveBeenCalledWith(
+        1013,
+        'Client output buffer limit exceeded',
+      );
+      expect(manager.getClientSessions('slow-client')).toEqual([]);
+      expect(manager.getClientCount('session-1')).toBe(1);
     });
   });
 
@@ -324,11 +386,11 @@ describe('SessionManager', () => {
 
       const localSessions = manager.getSessions({ type: 'local' });
       expect(localSessions).toHaveLength(1);
-      expect(localSessions[0].type).toBe('local');
+      expect(localSessions[0]?.type).toBe('local');
 
       const dockerSessions = manager.getSessions({ type: 'docker-exec' });
       expect(dockerSessions).toHaveLength(1);
-      expect(dockerSessions[0].type).toBe('docker-exec');
+      expect(dockerSessions[0]?.type).toBe('docker-exec');
     });
 
     it('should filter sessions by accepting status', () => {
@@ -360,7 +422,7 @@ describe('SessionManager', () => {
 
       const acceptingSessions = manager.getSessions({ accepting: true });
       expect(acceptingSessions).toHaveLength(1);
-      expect(acceptingSessions[0].id).toBe('accepting');
+      expect(acceptingSessions[0]?.id).toBe('accepting');
     });
   });
 
@@ -389,7 +451,7 @@ describe('SessionManager', () => {
       expect(info.container).toBe('my-container');
       expect(info.label).toBe('Test Session');
       expect(info.clientCount).toBe(1);
-      expect(info.accepting).toBe(true);
+      expect(info.accepting).toBe(false);
       expect(info.ownerId).toBe('client-1');
     });
   });
@@ -430,6 +492,7 @@ describe('SessionManager', () => {
         rows: 24,
         ownerId: 'client-1',
         ownerWs: createMockWebSocket(),
+        allowJoin: true,
       });
 
       manager.addClient('session-1', 'client-2', createMockWebSocket());

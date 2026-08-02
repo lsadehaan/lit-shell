@@ -1,13 +1,24 @@
 {
   "name": "lit-shell-docker-example",
   "version": "1.0.0",
+  "private": true,
   "description": "Example: Connect to Docker containers with lit-shell",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "deps:build": "npm rebuild --ignore-scripts=false --strict-allow-scripts=true node-pty",
+    "start": "node server.js",
+    "test": "node --test ../shared/http.test.js"
   },
   "dependencies": {
     "lit-shell.js": "file:../..",
-    "node-pty": "^1.0.0"
+    "node-pty": "1.1.0"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "allowScripts": {
+    "node-pty@1.1.0": true
   }
 }

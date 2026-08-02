@@ -38,13 +38,45 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && npm run build:browser",
+    "build": "npm run generate:assets && npm run clean && npm run build:types && npm run build:browser",
+    "generate:assets": "node scripts/generate-xterm-css.js",
+    "build:types": "tsc -p tsconfig.build.json && node scripts/embed-declaration-map-sources.js",
     "build:browser": "node scripts/build-browser.js",
-    "watch": "tsc --watch",
-    "clean": "rm -rf dist",
-    "prepublishOnly": "npm run clean && npm run build",
+    "deps:build": "npm rebuild --ignore-scripts=false --strict-allow-scripts=true esbuild node-pty",
+    "deps:scripts:check": "node scripts/check-install-script-policy.js",
+    "watch": "tsc -p tsconfig.build.json --watch",
+    "clean": "node scripts/clean.js",
+    "release:verify": "npm run validate && npm run package:check",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:quality-policy": "node --test tests/quality-baseline-policy.test.js",
+    "test:e2e:protocol": "vitest run tests/e2e",
+    "test:e2e:browser": "playwright test",
+    "test:examples": "node --test examples/shared/http.test.js",
+    "test:example-server": "node tests/fixtures/example-server-smoke.mjs",
+    "test:pty-smoke": "node scripts/smoke-pty.js",
+    "test:all": "npm run test:coverage && npm run test:examples && npm run test:e2e:browser",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "docs:lint": "markdownlint-cli2",
+    "crap:report": "crap-typescript --threshold 342 --format json --output reports/crap.json --junit-report reports/crap-junit.xml src",
+    "crap:changed": "crap-typescript --changed --threshold 8",
+    "crap:ratchet": "node scripts/check-crap-ratchet.js",
+    "crap:baseline": "node scripts/check-crap-ratchet.js --update",
+    "quality:policy": "node scripts/check-quality-baseline-policy.js",
+    "deps:check": "knip",
+    "package:check": "npm run build && publint && attw --pack . --profile esm-only && node scripts/check-packed-consumer.js",
+    "changeset": "changeset",
+    "locks:examples": "node scripts/refresh-example-locks.js",
+    "version:check": "node scripts/sync-versions.js",
+    "version:sync": "node scripts/sync-versions.js --write",
+    "version-packages": "changeset version && npm run version:sync && npm install --package-lock-only --ignore-scripts && npm run locks:examples && npm run version:check",
+    "validate": "npm run format:check && npm run lint && npm run typecheck && npm run version:check && npm run docs:lint && npm run deps:check && npm run test:quality-policy && npm run quality:policy && npm run test:coverage && npm run test:examples && npm run crap:report && npm run crap:ratchet"
   },
   "keywords": [
     "terminal",
@@ -69,29 +101,50 @@
   },
   "homepage": "https://github.com/lsadehaan/lit-shell#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^22.13.0 || >=24.0.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "node-pty@1.1.0": true
   },
   "dependencies": {
-    "lit": "^3.3.2",
-    "ws": "^8.14.0"
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "@types/ws": "^8.18.1",
+    "lit": "^3.3.3",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "@types/ws": "^8.5.10",
-    "esbuild": "^0.19.0",
-    "node-pty": "^1.1.0",
-    "typescript": "^5.3.0",
-    "vitest": "^4.0.16",
-    "xterm": "^5.3.0"
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@axe-core/playwright": "^4.12.1",
+    "@barney-media/crap-typescript": "0.4.2",
+    "@changesets/cli": "^2.31.1",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "4.1.10",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.8.0",
+    "eslint-plugin-lit": "^2.3.1",
+    "eslint-plugin-security": "^4.0.1",
+    "eslint-plugin-wc": "^3.1.0",
+    "fast-check": "^4.9.0",
+    "globals": "^17.8.0",
+    "knip": "^6.31.0",
+    "markdownlint-cli2": "^0.23.2",
+    "node-pty": "1.1.0",
+    "prettier": "^3.9.6",
+    "publint": "^0.3.22",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "4.1.10"
   },
   "peerDependencies": {
-    "express": "^4.18.0 || ^5.0.0",
-    "node-pty": "1"
+    "node-pty": "1.1.0"
   },
   "peerDependenciesMeta": {
-    "express": {
-      "optional": true
-    },
     "node-pty": {
       "optional": true
     }

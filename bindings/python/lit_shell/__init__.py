@@ -17,19 +17,21 @@ Usage:
 
 from .client import TerminalClient
 from .types import (
+    JoinOptions,
+    ServerInfo,
     SessionInfo,
+    SessionListFilter,
     SharedSessionInfo,
     TerminalOptions,
-    JoinOptions,
-    SessionListFilter,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.2.1"
 __all__ = [
-    "TerminalClient",
-    "SessionInfo",
-    "SharedSessionInfo",
-    "TerminalOptions",
     "JoinOptions",
+    "ServerInfo",
+    "SessionInfo",
     "SessionListFilter",
+    "SharedSessionInfo",
+    "TerminalClient",
+    "TerminalOptions",
 ]

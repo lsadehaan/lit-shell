@@ -1,129 +1,150 @@
-/**
- * lit-shell Session Multiplexing Example
- *
- * This example demonstrates session multiplexing - multiple clients can
- * connect to the same terminal session, share output, and collaborate.
- *
- * Features demonstrated:
- * - Session persistence (sessions survive client disconnects)
- * - Multiple clients per session
- * - Session history replay on join
- * - Session listing and joining
- * - Docker attach mode (connecting to container's main process)
- *
- * Usage:
- * 1. Run this server: node server.js
- * 2. Open index.html in multiple browser tabs
- * 3. Create a session in one tab, join it from another
- */
+import { mkdir, realpath } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
-import { createServer } from 'http';
-import { readFileSync, existsSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { TerminalServer } from '../../dist/server/index.js';
+import { TerminalServer } from 'lit-shell.js/server';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = join(__dirname, '../..');
+import {
+  parseAllowedOrigins,
+  parsePort,
+  parseRequestPath,
+  reportRequestFailure,
+  sendFile,
+  sendJson,
+  sendText,
+} from '../shared/http.js';
 
-// Create HTTP server
-const server = createServer((req, res) => {
-  console.log(`[HTTP] ${req.method} ${req.url}`);
+const exampleDirectory = dirname(fileURLToPath(import.meta.url));
+const distDirectory = resolve(exampleDirectory, '../../dist');
+const exampleAssets = new Set(['/app.js', '/index.html', '/style.css']);
 
-  if (req.url === '/' || req.url === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(readFileSync(join(__dirname, 'index.html')));
-  }
-  // Serve dist files
-  else if (req.url.startsWith('/dist/')) {
-    const file = join(rootDir, req.url);
-    if (existsSync(file)) {
-      const contentType = req.url.endsWith('.js') ? 'application/javascript' :
-                         req.url.endsWith('.map') ? 'application/json' : 'text/plain';
-      res.writeHead(200, { 'Content-Type': contentType });
-      res.end(readFileSync(file));
-    } else {
-      res.writeHead(404);
-      res.end('File not found');
-    }
-  }
-  // API endpoint to get server stats
-  else if (req.url === '/api/stats') {
-    const stats = terminalServer.getStats();
-    const sessions = terminalServer.getSharedSessions();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ stats, sessions }, null, 2));
-  }
-  else {
-    res.writeHead(404);
-    res.end('Not found');
-  }
-});
+const host = process.env.HOST ?? '127.0.0.1';
+const port = parsePort(process.env.PORT);
+const allowedOrigins = parseAllowedOrigins(
+  process.env.LIT_SHELL_ALLOWED_ORIGINS,
+  port,
+);
+const verbose = process.env.LIT_SHELL_VERBOSE === 'true';
+const dockerEnabled = process.env.LIT_SHELL_ENABLE_DOCKER === 'true';
+const exposeSessionDetails =
+  process.env.LIT_SHELL_EXPOSE_SESSION_DETAILS === 'true';
+const requestedWorkDirectory =
+  process.env.LIT_SHELL_WORKDIR ?? '/tmp/lit-shell-multiplexing';
+await mkdir(requestedWorkDirectory, { recursive: true });
+const terminalWorkDirectory = await realpath(requestedWorkDirectory);
 
-// Create terminal server with multiplexing enabled
 const terminalServer = new TerminalServer({
-  // Allow local shells
-  allowedShells: ['/bin/bash', '/bin/sh', '/bin/zsh'],
-  allowedPaths: [process.env.HOME || '/root', '/tmp'],
-  defaultCwd: process.env.HOME || '/root',
+  allowedOrigins,
+  allowedShells: ['/bin/sh'],
+  allowedPaths: [terminalWorkDirectory],
+  defaultShell: '/bin/sh',
+  defaultCwd: terminalWorkDirectory,
 
-  // Docker support (optional)
-  allowDockerExec: true,
-  allowedContainerPatterns: ['.*'], // Allow all containers for demo
+  allowLocalExec: !dockerEnabled,
+  allowDockerExec: dockerEnabled,
+  allowedContainerPatterns: ['^test-[a-z0-9][a-z0-9_.-]*$'],
   defaultContainerShell: '/bin/sh',
 
-  // Session multiplexing options
-  maxClientsPerSession: 10,        // Up to 10 clients per session
-  orphanTimeout: 120000,           // 2 minute timeout before orphaned sessions are killed
-  historySize: 100000,             // 100KB history buffer per session
-  historyEnabled: true,            // Enable history replay on join
-  maxSessionsTotal: 50,            // Maximum concurrent sessions
-
-  // General settings
-  maxSessionsPerClient: 5,
-  idleTimeout: 30 * 60 * 1000,     // 30 minutes
-
-  // Enable logging
-  verbose: true,
+  maxClientsPerSession: 5,
+  orphanTimeout: 60_000,
+  historySize: 100_000,
+  historyEnabled: true,
+  maxSessionsTotal: 10,
+  maxSessionsPerClient: 3,
+  idleTimeout: 10 * 60_000,
+  verbose,
 });
 
-// Attach to HTTP server
+async function handleRequest(request, response) {
+  const pathname = parseRequestPath(request, response);
+  if (pathname === null) return;
+
+  if (pathname === '/healthz') {
+    sendJson(request, response, 200, { status: 'ok' });
+    return;
+  }
+
+  if (pathname === '/api/stats') {
+    const payload = { stats: terminalServer.getStats() };
+    if (exposeSessionDetails) {
+      payload.sessions = terminalServer.getSharedSessions().map((session) => ({
+        accepting: session.accepting,
+        clientCount: session.clientCount,
+        label: session.label,
+        sessionId: session.sessionId,
+        type: session.type,
+      }));
+    }
+    sendJson(request, response, 200, payload);
+    return;
+  }
+
+  if (pathname === '/') {
+    await sendFile(request, response, {
+      root: exampleDirectory,
+      pathname: '/index.html',
+    });
+    return;
+  }
+
+  if (exampleAssets.has(pathname)) {
+    await sendFile(request, response, { root: exampleDirectory, pathname });
+    return;
+  }
+
+  if (pathname.startsWith('/dist/')) {
+    await sendFile(request, response, {
+      root: distDirectory,
+      pathname: pathname.slice('/dist'.length),
+    });
+    return;
+  }
+
+  sendText(request, response, 404, 'Not found\n');
+}
+
+const server = createServer((request, response) => {
+  handleRequest(request, response).catch((error) => {
+    reportRequestFailure(response, error);
+  });
+});
+
+server.on('clientError', (_error, socket) => {
+  socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+});
 terminalServer.attach(server);
 
-// Log session events
-setInterval(() => {
-  const stats = terminalServer.getStats();
-  if (stats.sessionCount > 0) {
-    console.log(`[Stats] Sessions: ${stats.sessionCount}, Clients: ${stats.clientCount}, Orphaned: ${stats.orphanedCount}`);
-  }
-}, 10000);
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[example] ${signal} received; shutting down`);
+  terminalServer.close();
+  server.close((error) => {
+    process.exitCode = error ? 1 : 0;
+  });
+  setTimeout(() => process.exit(1), 5_000).unref();
+}
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════════════════════════════════╗
-║           lit-shell Session Multiplexing Example                      ║
-╠════════════════════════════════════════════════════════════════════╣
-║                                                                    ║
-║  Server running at: http://localhost:${PORT}                         ║
-║  WebSocket endpoint: ws://localhost:${PORT}/terminal                 ║
-║  Stats API: http://localhost:${PORT}/api/stats                       ║
-║                                                                    ║
-║  How to test multiplexing:                                         ║
-║                                                                    ║
-║  1. Open http://localhost:${PORT} in your browser                    ║
-║  2. Click "New Session" to create a terminal                       ║
-║  3. Run some commands to generate history                          ║
-║  4. Open another browser tab to http://localhost:${PORT}             ║
-║  5. Click "Refresh Sessions" to see the existing session           ║
-║  6. Click "Join" to connect to the same session                    ║
-║  7. Both tabs now share the same terminal!                         ║
-║                                                                    ║
-║  To test Docker attach mode:                                       ║
-║  1. Start a container: docker run -it --name demo alpine sh        ║
-║  2. Select "Docker Attach" mode and enter container name           ║
-║  3. You'll connect to the container's main process (PID 1)         ║
-║                                                                    ║
-╚════════════════════════════════════════════════════════════════════╝
-  `);
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+server.listen(port, host, () => {
+  const displayHost = host.includes(':') ? `[${host}]` : host;
+  const origin = `http://${displayHost}:${port}`;
+  console.log(`[example] Multiplexing demo: ${origin}`);
+  console.log(
+    `[example] WebSocket endpoint: ws://${displayHost}:${port}/terminal`,
+  );
+  if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
+    console.warn(
+      '[example] WARNING: this unauthenticated demo is listening beyond loopback.',
+    );
+  }
+  if (dockerEnabled) {
+    console.warn(
+      '[example] Docker access is enabled only for test-* containers; local host shells are disabled.',
+    );
+  }
 });

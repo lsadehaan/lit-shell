@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose an improvement to lit-shell.js
+title: '[Feature]: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before the implementation. Large API, protocol, or architectural changes should be discussed before substantial work begins.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Proposed area
+      options:
+        - Server and session management
+        - JavaScript client
+        - Web component and browser UI
+        - Python binding
+        - Docker or examples
+        - Build, packaging, or contributor tooling
+        - Documentation
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this, and what can they not do safely or conveniently today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the observable behavior or API. Examples and rough interfaces are welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What existing APIs, workarounds, or different designs did you evaluate?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and security impact
+      description: Note protocol, API, browser bundle, native dependency, performance, or security implications.
+
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Are you interested in implementing this after the direction is agreed?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues for an existing proposal.
+          required: true
+        - label: This request describes a concrete user problem, not only a preferred implementation.
+          required: true

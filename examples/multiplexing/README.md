@@ -1,146 +1,101 @@
-# lit-shell Session Multiplexing Example
+# Session multiplexing example
 
-This example demonstrates lit-shell's session multiplexing feature - multiple clients can connect to the same terminal session, share output, and collaborate in real-time.
+This example shows several browser clients sharing a terminal session, replaying
+history, and leaving a session running for another client.
 
-## Features Demonstrated
+The page explicitly enables the component's `allow-join` attribute for this
+collaboration demo. Normal component sessions remain private by default.
 
-- **Session Persistence** - Sessions survive client disconnects
-- **Multiple Clients** - Up to 10 clients can share a single session
-- **History Replay** - New clients receive recent terminal output on join
-- **Session Discovery** - List and join existing sessions
-- **Docker Attach** - Connect to a container's main process (PID 1)
+> [!WARNING]
+> This is an unauthenticated local demo. It binds to `127.0.0.1` by default.
+> Browser WebSockets are restricted to exact local origins by default.
+> Put an authenticated reverse proxy in front of the WebSocket endpoint before
+> adapting it for a shared environment.
 
 ## Prerequisites
 
-- Node.js 18+
-- Docker (optional, for container features)
+- Node.js 22.13 or newer in the Node 22 line, or Node.js 24+
+- A C/C++ toolchain supported by `node-pty`
+- Docker only when explicitly enabling the optional container mode
 
-## Installation
+## Install and run
 
-```bash
-npm install
-```
-
-## Running the Example
+Build the checkout, install the example's locked runtime dependencies, and
+start the server:
 
 ```bash
+npm ci --prefix ../..
+npm run deps:build --prefix ../..
+npm run build --prefix ../..
+npm ci
+npm run deps:build
 npm start
 ```
 
-Then open http://localhost:3000 in your browser.
+Open <http://127.0.0.1:3000>. To try multiplexing:
 
-## How to Test Multiplexing
+1. Create a local shell in the first browser tab.
+2. Generate some output.
+3. Open the page in a second tab.
+4. Select **Join Existing Session**, choose the session, and join it.
+5. Close the first tab and continue from the second.
 
-1. Open http://localhost:3000 in your browser (Tab 1)
-2. Click "Create Session" to start a new terminal
-3. Run some commands to generate history (e.g., `ls -la`, `echo "Hello"`)
-4. Open http://localhost:3000 in a new browser tab (Tab 2)
-5. Click "Refresh" to see the existing session
-6. Click "Join" to connect to the same session
-7. Both tabs now share the terminal!
-   - Commands typed in either tab appear in both
-   - Tab 2 receives the history from before it joined
-8. Close Tab 1 - the session survives!
-9. Tab 2 can continue using the session
+With the default Docker-disabled configuration, local sessions use `/bin/sh`
+and start in `/tmp/lit-shell-multiplexing`. That initial-directory check is not
+a filesystem sandbox; the shell can access anything permitted to the server's
+OS account. The example limits both per-client and global session counts and
+expires idle/orphaned sessions.
 
-## Testing Docker Attach Mode
+## Configuration
 
-Docker attach connects to a container's main process (PID 1) instead of spawning a new shell.
+The following environment variables are intentionally opt-in:
 
-```bash
-# Start an interactive container
-docker run -it --name demo alpine sh
+| Variable                           | Default                       | Purpose                                             |
+| ---------------------------------- | ----------------------------- | --------------------------------------------------- |
+| `HOST`                             | `127.0.0.1`                   | Listen address; non-loopback values expose the demo |
+| `PORT`                             | `3000`                        | HTTP and WebSocket port                             |
+| `LIT_SHELL_ALLOWED_ORIGINS`        | Exact local origins           | Comma-separated canonical HTTP(S) browser origins   |
+| `LIT_SHELL_WORKDIR`                | `/tmp/lit-shell-multiplexing` | Initial local-shell directory                       |
+| `LIT_SHELL_VERBOSE`                | `false`                       | Enable diagnostic server logging                    |
+| `LIT_SHELL_ENABLE_DOCKER`          | `false`                       | Enable Docker exec/attach support                   |
+| `LIT_SHELL_EXPOSE_SESSION_DETAILS` | `false`                       | Add reduced session metadata to the stats API       |
 
-# In another terminal, run the example server
-npm start
+When using a different hostname or reverse proxy, set the public origins
+explicitly, for example
+`LIT_SHELL_ALLOWED_ORIGINS=https://terminal.example.com`. Origin checks prevent
+unwanted browser origins; they do not authenticate non-browser clients.
 
-# Open http://localhost:3000
-# Select "Docker Attach" mode
-# Enter "demo" as the container name
-# Click "Create Session"
-# You're now connected to the same shell as the docker run command!
-```
-
-## Server Configuration
-
-Key multiplexing options in `server.js`:
-
-```javascript
-const terminalServer = new TerminalServer({
-  // Session multiplexing options
-  maxClientsPerSession: 10,     // Max clients per session
-  orphanTimeout: 120000,        // 2 min before orphan cleanup
-  historySize: 100000,          // 100KB history buffer
-  historyEnabled: true,         // Enable history replay
-  maxSessionsTotal: 50,         // Max concurrent sessions
-});
-```
-
-## Client API
-
-```javascript
-import { TerminalClient } from 'lit-shell.js/client';
-
-const client = new TerminalClient({ url: 'ws://localhost:3000/terminal' });
-await client.connect();
-
-// List available sessions
-const sessions = await client.listSessions();
-
-// Create a new session
-const session = await client.spawn({
-  label: 'my-session',
-  allowJoin: true,
-  enableHistory: true,
-});
-
-// Join an existing session
-const joined = await client.join({
-  sessionId: 'term-123...',
-  requestHistory: true,
-  historyLimit: 50000,
-});
-
-// Leave without killing session
-client.leave();
-
-// Event handlers
-client.onClientJoined((sessionId, count) => {
-  console.log(`Client joined, ${count} total`);
-});
-
-client.onClientLeft((sessionId, count) => {
-  console.log(`Client left, ${count} remaining`);
-});
-
-client.onSessionClosed((sessionId, reason) => {
-  console.log(`Session closed: ${reason}`);
-});
-```
-
-## Stats API
-
-The example server provides a stats endpoint:
+Docker mode accepts only container names matching `test-*`:
 
 ```bash
-curl http://localhost:3000/api/stats
+docker run --detach --name test-alpine alpine:3.23.5 sleep infinity
+LIT_SHELL_ENABLE_DOCKER=true npm start
 ```
 
-Returns:
-```json
-{
-  "stats": {
-    "sessionCount": 2,
-    "clientCount": 5,
-    "orphanedCount": 0
-  },
-  "sessions": [
-    {
-      "sessionId": "term-1234...",
-      "type": "local",
-      "clientCount": 3,
-      "accepting": true
-    }
-  ]
-}
+Enabling Docker mode disables local host-shell sessions. This prevents a local
+shell from invoking the Docker CLI through daemon access and bypassing the
+container-name allowlist. The connection panel will offer Docker modes instead.
+
+Docker daemon access is equivalent to host-root access. Do not enable it on an
+untrusted or internet-facing server.
+
+## Health and statistics
+
+The server exposes two read-only endpoints:
+
+```bash
+curl --fail http://127.0.0.1:3000/healthz
+curl --fail http://127.0.0.1:3000/api/stats
+```
+
+Session details are excluded from `/api/stats` unless explicitly enabled.
+
+## Tests
+
+The lightweight HTTP tests exercise decoded traversal, symlink containment,
+safe methods, HEAD handling, content types, and security headers:
+
+```bash
+npm test
+npm audit --omit=dev
 ```
