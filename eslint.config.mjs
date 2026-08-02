@@ -10,6 +10,7 @@ export default tseslint.config(
     ignores: [
       'coverage/**',
       'dist/**',
+      '_site/**',
       'node_modules/**',
       'playwright-report/**',
       'reports/**',
@@ -20,7 +21,7 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.ts', 'demo/**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -47,6 +48,12 @@ export default tseslint.config(
     files: ['src/server/**/*.ts'],
     plugins: { security },
     rules: security.configs.recommended.rules,
+  },
+  {
+    files: ['demo/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.browser },
+    },
   },
   {
     files: ['src/ui/**/*.ts'],

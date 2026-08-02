@@ -42,6 +42,7 @@
     "generate:assets": "node scripts/generate-xterm-css.js",
     "build:types": "tsc -p tsconfig.build.json && node scripts/embed-declaration-map-sources.js",
     "build:browser": "node scripts/build-browser.js",
+    "build:pages": "npm run generate:assets && node scripts/build-pages.js",
     "deps:build": "npm rebuild --ignore-scripts=false --strict-allow-scripts=true esbuild node-pty",
     "deps:scripts:check": "node scripts/check-install-script-policy.js",
     "watch": "tsc -p tsconfig.build.json --watch",
@@ -49,13 +50,15 @@
     "release:verify": "npm run validate && npm run package:check",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
+    "test:unit": "vitest run tests/circular-buffer.test.ts tests/circular-buffer.property.test.ts tests/demo-websocket.test.ts tests/session-manager.test.ts tests/terminal-client.test.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:quality-policy": "node --test tests/quality-baseline-policy.test.js tests/install-script-policy.test.js",
     "test:e2e:protocol": "vitest run tests/e2e",
     "test:e2e:browser": "playwright test",
+    "test:e2e:pages": "playwright test tests/browser/pages-demo.spec.ts",
     "test:examples": "node --test examples/shared/http.test.js",
+    "pages:check": "npm run build:pages && node scripts/check-pages.js",
     "test:example-server": "node tests/fixtures/example-server-smoke.mjs",
     "test:pty-smoke": "node scripts/smoke-pty.js",
     "test:all": "npm run test:coverage && npm run test:examples && npm run test:e2e:browser",
@@ -76,7 +79,7 @@
     "version:check": "node scripts/sync-versions.js",
     "version:sync": "node scripts/sync-versions.js --write",
     "version-packages": "changeset version && npm run version:sync && npm install --package-lock-only --ignore-scripts && npm run locks:examples && npm run version:check",
-    "validate": "npm run format:check && npm run lint && npm run typecheck && npm run version:check && npm run docs:lint && npm run deps:check && npm run test:quality-policy && npm run quality:policy && npm run test:coverage && npm run test:examples && npm run crap:report && npm run crap:ratchet"
+    "validate": "npm run format:check && npm run lint && npm run typecheck && npm run version:check && npm run docs:lint && npm run deps:check && npm run pages:check && npm run test:quality-policy && npm run quality:policy && npm run test:coverage && npm run test:examples && npm run crap:report && npm run crap:ratchet"
   },
   "keywords": [
     "terminal",
