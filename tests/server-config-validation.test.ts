@@ -8,6 +8,7 @@ import {
 } from '../src/server/index.js';
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_NODE_PTY_ID = 2_147_483_647;
 const INVALID_INTEGER_VALUES = [
   -1,
   1.5,
@@ -30,6 +31,12 @@ const NON_NEGATIVE_SERVER_LIMITS = [
   'historySize',
   'maxPreAuthMessages',
   'maxPreAuthBytes',
+  'maxConnectionMessages',
+  'maxConnectionBytes',
+  'maxSessionInputBytes',
+  'maxSessionOutputBytes',
+  'maxSessionLifetime',
+  'maxSessionsCreatedPerConnection',
 ] as const;
 
 function terminalOptions(
@@ -47,6 +54,12 @@ function sessionManagerConfig(
 }
 
 describe('TerminalServer resource-limit configuration', () => {
+  it('rejects a non-object constructor value at the runtime boundary', () => {
+    expect(
+      () => new TerminalServer(null as unknown as TerminalServerOptions),
+    ).toThrow(/options must be an object/);
+  });
+
   it.each(['server', 'port', 'misspelledLimit'])(
     'rejects unknown or removed constructor option %s',
     (name) => {
@@ -59,6 +72,7 @@ describe('TerminalServer resource-limit configuration', () => {
   it.each([
     'allowLocalExec',
     'allowDockerExec',
+    'allowSessionSharing',
     'historyEnabled',
     'verbose',
   ] as const)('rejects truthy string values for boolean option %s', (name) => {
@@ -105,6 +119,116 @@ describe('TerminalServer resource-limit configuration', () => {
     ).toThrow(/authorize must be a function/);
   });
 
+  it.each(['env', ['notARealOption'], ['shell', 7]])(
+    'rejects malformed allowedClientOptions value %j',
+    (value) => {
+      expect(
+        () =>
+          new TerminalServer({
+            allowedClientOptions: value,
+          } as unknown as TerminalServerOptions),
+      ).toThrow(/allowedClientOptions/);
+    },
+  );
+
+  it.each([
+    null,
+    [],
+    { 'NOT-PORTABLE': 'value' },
+    { VALID: 7 },
+    { VALID: undefined },
+    { VALID: 'contains\0nul' },
+  ])('rejects malformed localEnvironment value %j', (value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localEnvironment: value,
+        } as unknown as TerminalServerOptions),
+    ).toThrow(/localEnvironment/);
+  });
+
+  it('accepts an empty client-option allowlist and a sanitized environment', () => {
+    const server = new TerminalServer({
+      allowedClientOptions: [],
+      localEnvironment: { PATH: '/usr/bin:/bin' },
+    });
+
+    expect(server.getStats()).toEqual({
+      clientCount: 0,
+      orphanedCount: 0,
+      sessionCount: 0,
+    });
+    server.close();
+  });
+
+  it.each([{ localUid: 1000 }, { localGid: 1000 }] as TerminalServerOptions[])(
+    'requires localUid and localGid to be configured together: %j',
+    (options) => {
+      expect(() => new TerminalServer(options)).toThrow(
+        /localUid and localGid must be provided together/,
+      );
+    },
+  );
+
+  it.each([
+    ['localUid', -1],
+    ['localUid', 1.5],
+    ['localUid', Number.NaN],
+    ['localUid', Number.POSITIVE_INFINITY],
+    ['localUid', MAX_NODE_PTY_ID + 1],
+    ['localGid', -1],
+    ['localGid', 1.5],
+    ['localGid', Number.NaN],
+    ['localGid', Number.POSITIVE_INFINITY],
+    ['localGid', MAX_NODE_PTY_ID + 1],
+  ] as const)('rejects invalid POSIX identity %s=%s', (name, value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localUid: name === 'localUid' ? value : 1000,
+          localGid: name === 'localGid' ? value : 1000,
+        }),
+    ).toThrow(new RegExp(name));
+  });
+
+  it.each([
+    ['localUid', '1000'],
+    ['localUid', null],
+    ['localGid', '1000'],
+    ['localGid', null],
+  ] as const)('rejects non-numeric POSIX identity %s=%s', (name, value) => {
+    expect(
+      () =>
+        new TerminalServer({
+          localUid: name === 'localUid' ? value : 1000,
+          localGid: name === 'localGid' ? value : 1000,
+        } as unknown as TerminalServerOptions),
+    ).toThrow(new RegExp(name));
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'accepts zero and the largest node-pty POSIX identity',
+    () => {
+      const zero = new TerminalServer({ localUid: 0, localGid: 0 });
+      const largest = new TerminalServer({
+        localUid: MAX_NODE_PTY_ID,
+        localGid: MAX_NODE_PTY_ID,
+      });
+
+      zero.close();
+      largest.close();
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'rejects POSIX identity options on Windows',
+    () => {
+      expect(
+        () => new TerminalServer({ localUid: 1000, localGid: 1000 }),
+      ).toThrow(/not supported on Windows/);
+    },
+  );
+
   it.each(
     POSITIVE_SERVER_LIMITS.flatMap((name) =>
       [0, ...INVALID_INTEGER_VALUES].map((value) => [name, value] as const),
@@ -125,7 +249,7 @@ describe('TerminalServer resource-limit configuration', () => {
     );
   });
 
-  it.each(['cleanupInterval', 'orphanTimeout'] as const)(
+  it.each(['cleanupInterval', 'orphanTimeout', 'maxSessionLifetime'] as const)(
     'rejects timer overflow for %s',
     (name) => {
       expect(
@@ -141,6 +265,12 @@ describe('TerminalServer resource-limit configuration', () => {
       historySize: 0,
       maxPreAuthMessages: 0,
       maxPreAuthBytes: 0,
+      maxConnectionMessages: 0,
+      maxConnectionBytes: 0,
+      maxSessionInputBytes: 0,
+      maxSessionOutputBytes: 0,
+      maxSessionLifetime: 0,
+      maxSessionsCreatedPerConnection: 0,
     });
 
     expect(server.getStats()).toEqual({

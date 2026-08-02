@@ -261,6 +261,8 @@ export type TerminalMessage =
 export interface ClientConfig {
   /** WebSocket URL */
   url: string;
+  /** Optional WebSocket subprotocols, for example an admission capability */
+  protocols?: string | string[];
   /** Reconnect on disconnect (default: true) */
   reconnect?: boolean;
   /** Maximum reconnection attempts (default: 10) */
@@ -413,6 +415,9 @@ export interface SessionClosedMessage extends BaseMessage {
     | 'owner_closed'
     | 'process_exit'
     | 'idle_timeout'
+    | 'input_limit'
+    | 'output_limit'
+    | 'lifetime_timeout'
     | 'cleanup'
     | 'error';
 }

@@ -55,6 +55,33 @@ test('renders the documented controls with accessible semantics', async ({
   ).toEqual([]);
 });
 
+test('uses an explicit no-reconnect attribute for declarative opt-out', async ({
+  page,
+  browserErrors: _browserErrors,
+}) => {
+  await page.goto(fixture.pageUrl());
+  await waitForTestPage(page);
+
+  const policies = await page.evaluate(async () => {
+    const terminal = (
+      window as unknown as {
+        litShellTerminal: HTMLElement & {
+          reconnect: boolean;
+          updateComplete: Promise<boolean>;
+        };
+      }
+    ).litShellTerminal;
+    terminal.setAttribute('no-reconnect', '');
+    await terminal.updateComplete;
+    const disabled = terminal.reconnect;
+    terminal.removeAttribute('no-reconnect');
+    await terminal.updateComplete;
+    return { disabled, restored: terminal.reconnect };
+  });
+
+  expect(policies).toEqual({ disabled: false, restored: true });
+});
+
 test('auto-connects, spawns, and carries terminal input and output end to end', async ({
   page,
   browserErrors: _browserErrors,

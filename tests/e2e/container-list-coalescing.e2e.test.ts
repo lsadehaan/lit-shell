@@ -147,4 +147,25 @@ describe('TerminalServer container-list process bounds (black-box)', () => {
       expect.objectContaining({ id: 'retry1', name: 'recovered' }),
     ]);
   });
+
+  it('drops a delayed container-list response after the requester disconnects', async () => {
+    server = await startTestServer({ allowDockerExec: true });
+    const client = await server.connect();
+
+    client.send({ type: 'listContainers', requestId: 'disconnected' });
+    await waitUntil(() => execFileMock.mock.calls.length === 1, {
+      description: 'a pending docker ps process',
+    });
+    const callback = callbacks[0];
+    expect(callback).toBeDefined();
+    await client.close();
+
+    expect(() =>
+      callback!(null, 'abc123\tdemo\timage\tUp\trunning\n', ''),
+    ).not.toThrow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(client.messages).not.toContainEqual(
+      expect.objectContaining({ requestId: 'disconnected' }),
+    );
+  });
 });

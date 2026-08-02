@@ -13,8 +13,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  upstream-checks:
+    name: Require exact-source security checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      checks: read
+      contents: read
+
+    steps:
+      - name: Require successful CI and CodeQL checks for the tag commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          required_checks=(
+            'CI gate'
+            'Analyze javascript-typescript'
+            'Analyze python'
+          )
+          for attempt in $(seq 1 120); do
+            gh api \
+              "repos/$RELEASE_REPOSITORY/commits/$RELEASE_SHA/check-runs?per_page=100" \
+              > check-runs.json
+            pending='false'
+            for check_name in "${required_checks[@]}"; do
+              conclusion="$(jq --raw-output --arg name "$check_name" '
+                [.check_runs[] | select(.name == $name)]
+                | sort_by(.id) | last | .conclusion // "pending"
+              ' check-runs.json)"
+              case "$conclusion" in
+                success) ;;
+                pending) pending='true' ;;
+                *)
+                  echo "$check_name concluded $conclusion for $RELEASE_SHA" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            if [ "$pending" = 'false' ]; then
+              exit 0
+            fi
+            if [ "$attempt" = 120 ]; then
+              echo 'Required checks did not finish for the release commit' >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
   verify:
     name: Verify and pack release
+    needs: upstream-checks
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -75,6 +125,9 @@ jobs:
       - name: Run complete release verification
         run: npm run release:verify
 
+      - name: Build the enabled remote Pages test artifact
+        run: npm run pages:check:enabled
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium firefox webkit
 
@@ -82,7 +135,7 @@ jobs:
         run: npm run test:e2e:browser
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
           cache: pip
